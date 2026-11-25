@@ -26,7 +26,7 @@ struct AssistantPane: View {
 				VStack(alignment: .leading, spacing: 3) {
 					Text("Powered by Antigravity · ACP").font(.system(size: 14, weight: .semibold))
 					Text(
-						"Everything Bol thinks and does runs in an Antigravity session through `agy acp` using your active Google / Antigravity sign-in."
+						"Everything Bol thinks and does runs in an Antigravity session through agy acp using your active Google / Antigravity sign-in."
 					)
 					.font(UI.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 				}
@@ -272,6 +272,16 @@ struct HealthCard: View {
 	private func fixButton(fix: ServiceProblem.Fix) -> AnyView? {
 		let (title, action): (String, () -> Void)
 		switch fix {
+		case .requestSpeechRecognition:
+			(title, action) = (
+				"Allow…",
+				{
+					MacPermission.speechRecognition.request()
+					DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+						health.run(config: model.config)
+					}
+				}
+			)
 		case .useAppleOrOpenAIForListening:
 			(title, action) = ("Listening Settings", { paneRaw = Pane.listening.rawValue })
 		case .signInToAntigravity:

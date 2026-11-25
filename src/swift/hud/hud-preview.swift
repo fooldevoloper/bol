@@ -136,7 +136,7 @@ enum HUDPreview {
 				{ m in
 					m.phase = .error
 					m.status = "Not signed in to Antigravity"
-					m.text = "Run `agy acp --login` in a terminal."
+					m.text = "Run agy acp --login in a terminal."
 					m.deadline = Date().addingTimeInterval(6)
 					m.deadlineTotal = 8
 				}

@@ -3,7 +3,8 @@ import Foundation
 /// Something Bol depends on isn't working, worded for the person using Bol: what's wrong and what to do.
 struct ServiceProblem: Error, Equatable {
 	enum Fix: Equatable {
-		case useAppleOrOpenAIForListening, signInToAntigravity, installAntigravityCLI, checkConnection, tryAgain, none
+		case requestSpeechRecognition, useAppleOrOpenAIForListening, signInToAntigravity, installAntigravityCLI,
+			checkConnection, tryAgain, none
 	}
 
 	let title: String
@@ -55,7 +56,7 @@ enum ServiceDiagnosis {
 		ServiceProblem(
 			title: "Apple Speech isn't ready",
 			detail: "\(reason) Allow Speech Recognition in System Settings → Privacy & Security, or use Gemini/OpenAI.",
-			fix: .tryAgain)
+			fix: .requestSpeechRecognition)
 	}
 
 	/// Network-level failures, the same for every service.

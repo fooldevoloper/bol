@@ -125,7 +125,7 @@ struct OnboardingView: View {
 				"Bol is a voice assistant for your Mac that thinks and acts with Antigravity. Setup checks everything it needs, which takes about two minutes."
 		case .antigravityCLI:
 			return
-				"Bol runs on the Antigravity CLI (`agy`) installed on this Mac: every request becomes an Antigravity session with full access to your apps and files."
+				"Bol runs on the Antigravity CLI (agy) installed on this Mac: every request becomes an Antigravity session with full access to your apps and files."
 		case .account:
 			return
 				"Bol uses your active Google / Antigravity sign-in (or Gemini API credentials) to think and act on your Mac."
@@ -281,7 +281,7 @@ private struct AntigravityCLIStep: View {
 			case .installing:
 				CheckStatus(
 					kind: .working,
-					text: "Finish the installer in Terminal. Bol continues as soon as `agy` is installed.")
+					text: "Finish the installer in Terminal. Bol continues as soon as agy is installed.")
 			case .missing:
 				CheckStatus(kind: .warning, text: "Antigravity CLI isn't installed on this Mac.")
 				VStack(alignment: .leading, spacing: 10) {
