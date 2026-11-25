@@ -2,8 +2,8 @@ import SwiftUI
 
 // MARK: - Skills (Settings → Assistant)
 
-/// The Claude Code skills Bol can use: your own (~/.claude/skills), plugins' and your projects'. Ask for
-/// one by name ("use my release skill"), or just ask: Bol picks a skill when a request fits it.
+/// The Antigravity skills Bol can use: your own (~/.gemini/skills, ~/.agents/skills), plugins' and your
+/// workspace's. Ask for one by name ("use my release skill"), or just ask: Bol picks a skill when a request fits it.
 struct SkillsSection: View {
 	@ObservedObject var model: SettingsModel
 	@State private var isShowingAll = false
@@ -14,7 +14,7 @@ struct SkillsSection: View {
 		SettingsGroup(
 			title: "Skills",
 			footer:
-				"Your Claude Code skills, plugins' and projects'. Say “use my <name> skill”, or just ask: Bol uses one when it fits. Add skills in ~/.claude/skills or with /plugin in Claude Code."
+				"Your Antigravity skills, plugins' and workspace skills. Say “use my <name> skill”, or just ask: Bol uses one when it fits. Add skills in ~/.gemini/skills or ~/.agents/skills."
 		) {
 			if skills.isEmpty {
 				Text("No skills found yet. They're listed once Bol has started.")

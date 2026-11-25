@@ -430,14 +430,9 @@ enum ThreadIndex {
 
 	nonisolated private static func deleteFiles(sessionIds: [String]) {
 		let manager = FileManager.default
-		let projects =
-			(try? manager.contentsOfDirectory(at: Constants.claudeProjectsDirectory, includingPropertiesForKeys: nil))
-			?? []
 		for id in sessionIds where id.count == 36 {
-			for folder in [Constants.threadsDirectory] + projects {
-				try? manager.removeItem(at: folder.appendingPathComponent("\(id).jsonl"))
-				try? manager.removeItem(at: folder.appendingPathComponent(id))  // subagents, tool results
-			}
+			try? manager.removeItem(at: Constants.threadsDirectory.appendingPathComponent("\(id).jsonl"))
+			try? manager.removeItem(at: Constants.threadsDirectory.appendingPathComponent(id))
 		}
 	}
 
@@ -517,45 +512,17 @@ enum ThreadIndex {
 		return (threads.sorted { $0.lastActivity > $1.lastActivity }, missing, cache)
 	}
 
-	/// Every transcript, by session id: Bol's own copies (~/.bol/threads) and the ones Claude Code keeps across
-	/// all working directories. Where both exist the fuller one wins; Claude Code's never outlives its cleanup.
+	/// Every transcript, by session id: Bol's own copies (~/.bol/threads).
 	nonisolated private static func transcriptFiles() -> [String: URL] {
 		let manager = FileManager.default
 		var files: [String: URL] = [:]
-		func size(_ url: URL) -> Int { (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
-		let projects =
-			(try? manager.contentsOfDirectory(at: Constants.claudeProjectsDirectory, includingPropertiesForKeys: nil))
-			?? []
-		for project in projects {
-			for file in (try? manager.contentsOfDirectory(at: project, includingPropertiesForKeys: nil)) ?? []
-			where file.pathExtension == "jsonl" {
-				files[file.deletingPathExtension().lastPathComponent] = file
-			}
-		}
 		let own =
 			(try? manager.contentsOfDirectory(at: Constants.threadsDirectory, includingPropertiesForKeys: nil)) ?? []
 		for file in own where file.pathExtension == "jsonl" {
-			let id = file.deletingPathExtension().lastPathComponent
-			if let theirs = files[id], size(theirs) > size(file) { continue }
-			files[id] = file
+			files[file.deletingPathExtension().lastPathComponent] = file
 		}
 		return files
 	}
 
-	/// Copies Bol's threads that only Claude Code holds into ~/.bol/threads, before its cleanup deletes them.
-	nonisolated private static func adopt(sessionIds: [String], files: [String: URL]) {
-		let manager = FileManager.default
-		try? manager.createDirectory(at: Constants.threadsDirectory, withIntermediateDirectories: true)
-		for id in sessionIds {
-			guard let file = files[id], !file.path.hasPrefix(Constants.threadsDirectory.path) else { continue }
-			let destination = Constants.threadsDirectory.appendingPathComponent("\(id).jsonl")
-			guard !manager.fileExists(atPath: destination.path) else { continue }
-			do {
-				try manager.copyItem(at: file, to: destination)
-				chmod(destination.path, 0o600)
-			} catch {
-				Log.info(message: "threads: couldn't keep \(id): \(error)")
-			}
-		}
-	}
+	nonisolated private static func adopt(sessionIds: [String], files: [String: URL]) {}
 }

@@ -14,6 +14,21 @@ enum ConfigMigration {
 		return upgraded
 	}
 
+	static func antigravityKeys(stored: [String: Any]) -> [String: Any] {
+		var upgraded = stored
+		if upgraded["agentModel"] == nil, let oldModel = upgraded.removeValue(forKey: "claudeModel") {
+			upgraded["agentModel"] = oldModel
+		}
+		if upgraded["agentEffort"] == nil, let oldEffort = upgraded.removeValue(forKey: "claudeEffort") {
+			upgraded["agentEffort"] = oldEffort
+		}
+		if var stt = upgraded["speechToText"] as? [String: Any], (stt["provider"] as? String) == "claude" {
+			stt["provider"] = "apple"
+			upgraded["speechToText"] = stt
+		}
+		return upgraded
+	}
+
 	static func migrated(stored: [String: Any]) -> [String: Any] {
 		guard stored["textToSpeech"] == nil, stored["ttsProvider"] != nil else { return stored }
 		Log.info(message: "config: migrating to the provider-plugin layout")
@@ -28,12 +43,7 @@ enum ConfigMigration {
 				if let v = pair.1 { result[pair.0] = v }
 			}
 		}
-		// Older configs stored short model aliases.
-		let modelAliases = [
-			"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5",
-			"fable": "claude-fable-5-2",
-		]
-		let claudeModel = (value(key: "claudeModel") as? String).map { modelAliases[$0.lowercased()] ?? $0 }
+		let sttProvider = (value(key: "sttProvider") as? String) == "claude" ? "apple" : value(key: "sttProvider")
 
 		return object(pairs: [
 			("apiKeys", object(pairs: [("openai", value(key: "openaiApiKey")), ("noiz", value(key: "noizApiKey"))])),
@@ -63,7 +73,7 @@ enum ConfigMigration {
 			(
 				"speechToText",
 				object(pairs: [
-					("provider", value(key: "sttProvider")),
+					("provider", sttProvider),
 					(
 						"openai",
 						object(pairs: [("model", value(key: "sttModel")), ("language", value(key: "language"))])
@@ -76,7 +86,7 @@ enum ConfigMigration {
 			("isSilentMode", value(key: "silentMode")),
 			("isChromeEnabled", value(key: "claudeInChrome")),
 			("screenAccess", value(key: "screenAccess")),
-			("claudeModel", claudeModel),
+			("agentModel", value(key: "claudeModel")),
 			("workingDirectory", value(key: "workingDirectory")),
 		])
 	}

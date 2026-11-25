@@ -1,89 +1,61 @@
 import Foundation
-import os
 
 /// Something Bol depends on isn't working, worded for the person using Bol: what's wrong and what to do.
 struct ServiceProblem: Error, Equatable {
 	enum Fix: Equatable {
-		case useOpenAIForListening, signInToClaude, installClaudeCode, checkConnection, tryAgain, none
+		case useAppleOrOpenAIForListening, signInToAntigravity, installAntigravityCLI, checkConnection, tryAgain, none
 	}
 
 	let title: String
 	let detail: String
 	var fix = Fix.none
-	/// The service itself is down or has changed (not a one-off failure): Bol stops relying on it until a
-	/// health check passes again.
 	var isOutage = false
 }
 
-/// Bol's listening and plan usage use two Anthropic endpoints that aren't public APIs: the ones behind
-/// Claude Code's `/voice` and `/usage`. They can change or close without notice, so every failure is
-/// classified here into a message that says what happened and what to do about it.
+/// Diagnoses external service failures (Antigravity CLI/auth, Google Gemini STT, OpenAI STT, macOS Speech).
 enum ServiceDiagnosis {
-	static let openAIHint = "Switch Settings → Listening to OpenAI to keep talking to Bol."
+	static let fallbackHint = "Switch Settings → Listening to Apple Speech to keep talking with no API key."
 
-	static func claudeSpeechToText(status: Int?, error: Error?, serverMessage: String?) -> ServiceProblem {
-		if let status, status != 101 {
+	static func geminiSpeechToText(status: Int?, error: Error?, serverMessage: String?) -> ServiceProblem {
+		if let status {
 			switch status {
-			case 401:
+			case 400, 401, 403:
 				return ServiceProblem(
-					title: "Claude didn't accept Bol's sign-in",
-					detail: "Sign in to Claude Code again from Settings → Assistant. \(openAIHint)",
-					fix: .signInToClaude, isOutage: true)
-			case 403:
-				return ServiceProblem(
-					title: "This Claude account can't use voice",
-					detail:
-						"Claude's speech-to-text needs a Claude Pro or Max plan, and Anthropic may limit it. \(openAIHint)",
-					fix: .useOpenAIForListening, isOutage: true)
+					title: "Gemini didn't accept the API key",
+					detail: "Check your Google Gemini API key in Settings → Listening. \(fallbackHint)",
+					fix: .useAppleOrOpenAIForListening)
 			case 429:
 				return ServiceProblem(
-					title: "Claude's voice service is rate limited",
-					detail: "Wait a minute and try again. \(openAIHint)", fix: .tryAgain)
+					title: "Gemini speech-to-text is rate limited",
+					detail: "Wait a moment and try again. \(fallbackHint)",
+					fix: .tryAgain)
 			case 500...599:
 				return ServiceProblem(
-					title: "Claude's voice service is having trouble",
-					detail: "Anthropic's side failed (HTTP \(status)). Try again shortly. \(openAIHint)",
+					title: "Gemini is having trouble",
+					detail: "Google's API failed (HTTP \(status)). Try again shortly. \(fallbackHint)",
 					fix: .tryAgain)
 			default:
 				return ServiceProblem(
-					title: "Claude's speech-to-text has changed",
-					detail:
-						"Bol listens through the service behind Claude Code's /voice, which isn't a public API, and it answered with HTTP \(status). \(openAIHint) An update to Bol will fix it.",
-					fix: .useOpenAIForListening, isOutage: true)
+					title: "Gemini speech-to-text failed",
+					detail: "Google's API returned HTTP \(status). \(fallbackHint)",
+					fix: .tryAgain)
 			}
 		}
-		if let problem = connection(error: error, service: "Anthropic") { return problem }
+		if let problem = connection(error: error, service: "Google Gemini") { return problem }
 		if let serverMessage, !serverMessage.isEmpty {
-			return ServiceProblem(title: "Claude couldn't transcribe that", detail: serverMessage, fix: .tryAgain)
+			return ServiceProblem(title: "Gemini couldn't transcribe that", detail: serverMessage, fix: .tryAgain)
 		}
 		return ServiceProblem(
-			title: "Claude's speech-to-text didn't respond",
-			detail: "Try again. If it keeps happening, \(openAIHint.prefix(1).lowercased() + openAIHint.dropFirst())",
+			title: "Gemini speech-to-text didn't respond",
+			detail: "Try again, or \(fallbackHint.prefix(1).lowercased() + fallbackHint.dropFirst())",
 			fix: .tryAgain)
 	}
 
-	static func planUsage(status: Int?, error: Error?) -> ServiceProblem {
-		if let problem = connection(error: error, service: "Anthropic") { return problem }
-		switch status {
-		case 401?:
-			return ServiceProblem(
-				title: "Usage needs a fresh sign-in", detail: "Sign in to Claude Code again from Settings → Assistant.",
-				fix: .signInToClaude)
-		case 403?:
-			return ServiceProblem(
-				title: "Claude didn't accept this login",
-				detail: "Bol needs a Claude Pro or Max subscription. Sign in with one from Settings → Assistant.",
-				fix: .signInToClaude)
-		case 429?:
-			return ServiceProblem(title: "Usage is rate limited", detail: "It refreshes in a minute.", fix: .tryAgain)
-		default:
-			let code = status.map { " (HTTP \($0))" } ?? ""
-			return ServiceProblem(
-				title: "Plan usage isn't available",
-				detail:
-					"The usage service behind Claude Code's /usage didn't answer\(code). Everything else in Bol works without it.",
-				isOutage: status.map { $0 < 500 } ?? false)
-		}
+	static func appleSpeechToText(reason: String) -> ServiceProblem {
+		ServiceProblem(
+			title: "Apple Speech isn't ready",
+			detail: "\(reason) Allow Speech Recognition in System Settings → Privacy & Security, or use Gemini/OpenAI.",
+			fix: .tryAgain)
 	}
 
 	/// Network-level failures, the same for every service.
@@ -111,45 +83,29 @@ enum ServiceDiagnosis {
 	}
 }
 
-/// Whether Claude speech-to-text is known to be out. While it is, listening uses OpenAI when it has a key
-/// (see `SpeechToTextProviders.active`). Read from any thread.
-enum SpeechToTextOutage {
-	private static let lock = OSAllocatedUnfairLock<ServiceProblem?>(initialState: nil)
-
-	static var current: ServiceProblem? { lock.withLock { $0 } }
-
-	static func record(problem: ServiceProblem?) {
-		lock.withLock { $0 = problem }
-	}
-}
-
-/// Checks everything Bol relies on and keeps the results for Settings → Assistant → Health, the menu and
-/// launch. Runs at launch, when Settings asks, and every 15 minutes while something is out.
+/// Checks everything Bol relies on and keeps the results for Settings → Assistant → Health, the menu and launch.
 @MainActor final class ServiceHealth: ObservableObject {
 	enum Item: String, CaseIterable, Identifiable {
-		case claudeCode, claudeAccount, speechToText, planUsage
+		case antigravityCLI, antigravityAccount, speechToText
 		var id: String { rawValue }
 
 		var title: String {
 			switch self {
-			case .claudeCode: return "Claude Code"
-			case .claudeAccount: return "Claude sign-in"
+			case .antigravityCLI: return "Antigravity CLI"
+			case .antigravityAccount: return "Antigravity sign-in"
 			case .speechToText: return "Listening"
-			case .planUsage: return "Plan usage"
 			}
 		}
 
 		var icon: String {
 			switch self {
-			case .claudeCode: return "terminal"
-			case .claudeAccount: return "person.crop.circle"
+			case .antigravityCLI: return "terminal"
+			case .antigravityAccount: return "person.crop.circle"
 			case .speechToText: return "mic"
-			case .planUsage: return "chart.bar"
 			}
 		}
 
-		/// Bol can't take requests while this fails (plan usage is only informational).
-		var isEssential: Bool { self != .planUsage }
+		var isEssential: Bool { true }
 	}
 
 	enum Status: Equatable {
@@ -202,76 +158,59 @@ enum SpeechToTextOutage {
 	/// A live failure (e.g. while listening) updates the matching row without a full check.
 	func report(item: Item, problem: ServiceProblem) {
 		statuses[item] = .problem(problem)
-		if item == .speechToText, problem.isOutage { SpeechToTextOutage.record(problem: problem) }
 		scheduleRecheck()
 	}
 
 	private func check(config: Config) async {
-		guard ClaudeCode.executable != nil else {
+		guard AntigravityCLI.executable != nil else {
 			let problem = ServiceProblem(
-				title: "Claude Code isn't installed",
-				detail:
-					"Bol thinks with the Claude Code on this Mac. Install it from Settings → General → Run Setup Again.",
-				fix: .installClaudeCode)
-			statuses = [
-				.claudeCode: .problem(problem), .claudeAccount: .unknown, .speechToText: .unknown, .planUsage: .unknown,
-			]
+				title: "Antigravity CLI isn't installed",
+				detail: "Bol thinks with `agy` on this Mac. Install it from Settings → General → Run Setup Again.",
+				fix: .installAntigravityCLI)
+			statuses = [.antigravityCLI: .problem(problem), .antigravityAccount: .unknown, .speechToText: .unknown]
 			return
 		}
-		statuses[.claudeCode] = .ok("Installed")
+		statuses[.antigravityCLI] = .ok("Installed")
 
-		guard let token = await ClaudeAuth.accessToken() else {
+		if let account = await AntigravityAuth.account() {
+			statuses[.antigravityAccount] = .ok(account.detail)
+		} else {
 			let problem = ServiceProblem(
-				title: "Not signed in to Claude Code",
-				detail: "Sign in from Settings → Assistant, or run `claude auth login` in Terminal.",
-				fix: .signInToClaude)
-			statuses[.claudeAccount] = .problem(problem)
-			statuses[.speechToText] = config.speechToText.provider == .claude ? .problem(problem) : .ok("OpenAI")
-			statuses[.planUsage] = .unknown
-			return
+				title: "Not signed in to Antigravity",
+				detail: "Sign in from Settings → Assistant, or run `agy acp --login` in Terminal.",
+				fix: .signInToAntigravity)
+			statuses[.antigravityAccount] = .problem(problem)
 		}
-		statuses[.claudeAccount] = .ok(await ClaudeAuth.account()?.plan ?? "Signed in")
 
-		async let speech = checkSpeechToText(config: config, token: token)
-		async let usage = checkPlanUsage()
-		statuses[.speechToText] = await speech
-		statuses[.planUsage] = await usage
+		statuses[.speechToText] = checkSpeechToText(config: config)
 	}
 
-	private func checkSpeechToText(config: Config, token: String) async -> Status {
-		guard config.speechToText.provider == .claude else {
-			SpeechToTextOutage.record(problem: nil)
-			return .ok("OpenAI")
+	private func checkSpeechToText(config: Config) -> Status {
+		let active = SpeechToTextProviders.active(config: config)
+		guard active.credential.isSatisfied(by: config) else {
+			let keyTitle =
+				switch active.credential {
+				case .apiKey(let id): id.title
+				case .none: ""
+				}
+			return .problem(
+				ServiceProblem(
+					title: "\(active.title) needs a \(keyTitle) API key",
+					detail: "Add it in Settings → Listening, or switch to Apple Speech.",
+					fix: .useAppleOrOpenAIForListening))
 		}
-		if let problem = await ClaudeSpeechToTextSession.probe(token: token) {
-			if problem.isOutage { SpeechToTextOutage.record(problem: problem) }
-			let hasFallback = ProviderCredential.apiKey(.openai).isSatisfied(by: config)
-			if problem.isOutage, hasFallback {
-				return .problem(
-					ServiceProblem(
-						title: problem.title, detail: "Bol is listening with OpenAI until Claude's works again.",
-						fix: problem.fix, isOutage: true))
-			}
-			return .problem(problem)
+		if active.id == .apple, !MacPermission.hasSpeechRecognition {
+			return .problem(
+				ServiceDiagnosis.appleSpeechToText(reason: "Speech Recognition permission is off or denied."))
 		}
-		SpeechToTextOutage.record(problem: nil)
-		return .ok("Claude · working")
-	}
-
-	private func checkPlanUsage() async -> Status {
-		do {
-			_ = try await PlanUsage.fetch()
-			return .ok("Available")
-		} catch let problem as ServiceProblem {
-			return .problem(problem)
-		} catch {
-			return .problem(ServiceDiagnosis.planUsage(status: nil, error: error))
-		}
+		return .ok(active.title)
 	}
 
 	private func scheduleRecheck() {
 		recheck?.cancel()
-		let hasProblem = statuses.values.contains { if case .problem = $0 { return true } else { return false } }
+		let hasProblem = statuses.values.contains {
+			if case .problem = $0 { return true } else { return false }
+		}
 		guard hasProblem else { return }
 		recheck = Task { @MainActor [weak self] in
 			try? await Task.sleep(nanoseconds: Self.recheckSeconds * 1_000_000_000)

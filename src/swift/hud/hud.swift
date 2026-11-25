@@ -1239,14 +1239,22 @@ final class HUD {
 		func pretty(name: String) -> String {
 			name.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ").capitalized
 		}
-		if tool.hasPrefix("mcp__claude-in-chrome__") || tool.hasPrefix("mcp__claude_in_chrome__") {
+		if tool.hasPrefix("mcp_chrome_devtools_") || tool.hasPrefix("mcp_chrome-devtools_")
+			|| tool.hasPrefix("mcp__claude-in-chrome__") || tool.hasPrefix("mcp__claude_in_chrome__")
+		{
 			let action = String(tool.split(separator: "_").last ?? "")
 			return ("globe", s.isEmpty ? "Chrome · \(pretty(name: action))" : s)
 		}
-		if tool == "mcp__bol__look_at_screen" { return ("eye", s.isEmpty ? "Looking at your screen" : s) }
-		if tool.hasPrefix("mcp__bol__") {
-			// Bol's own computer control (src/typescript/control.ts).
-			switch String(tool.dropFirst("mcp__bol__".count)) {
+		if tool == "mcp_bol_look_at_screen" || tool == "mcp__bol__look_at_screen" {
+			return ("eye", s.isEmpty ? "Looking at your screen" : s)
+		}
+		let bolTool: String? =
+			tool.hasPrefix("mcp_bol_")
+			? String(tool.dropFirst("mcp_bol_".count))
+			: tool.hasPrefix("mcp__bol__") ? String(tool.dropFirst("mcp__bol__".count)) : nil
+		if let bolTool {
+			// Bol's own computer control and task tools (src/typescript/control.ts, tasks.ts).
+			switch bolTool {
 			case "screenshot", "zoom": return ("eye", "Looking at your screen")
 			case "type": return ("keyboard", "Typing")
 			case "key", "hold_key": return ("keyboard", s.isEmpty ? "Pressing keys" : "Pressing \(s)")
@@ -1255,22 +1263,35 @@ final class HUD {
 			case "read_clipboard", "write_clipboard": return ("doc.on.clipboard", "Using the clipboard")
 			case "wait": return ("hourglass", "Waiting")
 			case "computer_batch": return ("cursorarrow.click.2", s.isEmpty ? "Operating your Mac" : s)
+			case "start_task", "message_task", "list_tasks", "stop_task":
+				return ("person.2", s.isEmpty ? pretty(name: bolTool) : s)
+			case "sign_in_to_server":
+				return ("person.crop.circle.badge.checkmark", s.isEmpty ? "Signing in to server" : s)
 			default: return ("cursorarrow.click", "Clicking")
 			}
 		}
-		if tool.hasPrefix("mcp__") {
+		if tool.hasPrefix("mcp__") || tool.hasPrefix("mcp_") {
 			let parts = tool.split(separator: "_").filter { !$0.isEmpty }
 			return ("puzzlepiece.extension", s.isEmpty ? pretty(name: String(parts.last ?? "tool")) : s)
 		}
 		switch tool {
-		case "Bash": return ("terminal", s.isEmpty ? "Running a command" : s)
-		case "Read": return ("doc.text", s.isEmpty ? "Reading a file" : "Reading \(s)")
-		case "Write": return ("square.and.pencil", s.isEmpty ? "Writing a file" : "Writing \(s)")
-		case "Edit", "MultiEdit": return ("pencil", s.isEmpty ? "Editing a file" : "Editing \(s)")
-		case "Glob", "Grep": return ("doc.text.magnifyingglass", s.isEmpty ? "Searching files" : "Searching for \(s)")
-		case "WebSearch": return ("magnifyingglass", s.isEmpty ? "Searching the web" : "Searching “\(s)”")
-		case "WebFetch": return ("globe", s.isEmpty ? "Opening a page" : "Opening \(s)")
-		case "Task", "Agent": return ("person.2", s.isEmpty ? "Delegating to a helper" : s)
+		case "Bash", "run_command", "command_status", "send_command_input":
+			return ("terminal", s.isEmpty ? "Running a command" : s)
+		case "Read", "view_file", "view_file_outline", "view_code_item":
+			return ("doc.text", s.isEmpty ? "Reading a file" : "Reading \(s)")
+		case "Write", "write_to_file", "create_file":
+			return ("square.and.pencil", s.isEmpty ? "Writing a file" : "Writing \(s)")
+		case "Edit", "MultiEdit", "replace_file_content", "multi_replace_file_content", "edit_file":
+			return ("pencil", s.isEmpty ? "Editing a file" : "Editing \(s)")
+		case "Glob", "Grep", "find_by_name", "find_file", "grep_search", "search_directory", "list_dir",
+			"list_directory":
+			return ("doc.text.magnifyingglass", s.isEmpty ? "Searching files" : "Searching for \(s)")
+		case "WebSearch", "search_web":
+			return ("magnifyingglass", s.isEmpty ? "Searching the web" : "Searching “\(s)”")
+		case "WebFetch", "read_url_content":
+			return ("globe", s.isEmpty ? "Opening a page" : "Opening \(s)")
+		case "Task", "Agent", "invoke_subagent", "start_subagent":
+			return ("person.2", s.isEmpty ? "Delegating to a helper" : s)
 		case "TodoWrite": return ("checklist", "Planning steps")
 		default: return ("sparkle", s.isEmpty ? pretty(name: tool) : s)
 		}

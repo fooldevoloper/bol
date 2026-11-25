@@ -1,6 +1,6 @@
 import Foundation
 
-/// What Bol's brain needs: Claude Code installed, and signed in with a Claude subscription.
+/// What Bol's brain needs: the Antigravity CLI (`agy`) installed, and signed in.
 struct EngineStatus: Equatable {
 	struct Step: Equatable, Identifiable {
 		let id: String
@@ -11,30 +11,30 @@ struct EngineStatus: Equatable {
 		let fixCommand: String
 	}
 
-	var claudeVersion: String?
-	var account: ClaudeAuth.Account?
+	var agyVersion: String?
+	var account: AntigravityAuth.Account?
 
-	var isInstalled: Bool { claudeVersion != nil }
+	var isInstalled: Bool { agyVersion != nil }
 	var isSignedIn: Bool { account != nil }
 	var isReady: Bool { isInstalled && isSignedIn }
 
 	var steps: [Step] {
 		[
 			Step(
-				id: "install", title: "Claude Code installed", isDone: isInstalled,
-				detail: claudeVersion.map { "Version \($0)" } ?? "Not installed",
-				fixHint: "Install Claude Code:", fixCommand: ClaudeCode.installCommand),
+				id: "install", title: "Antigravity CLI installed", isDone: isInstalled,
+				detail: agyVersion.map { "Version \($0)" } ?? "Not installed",
+				fixHint: "Install Antigravity CLI:", fixCommand: AntigravityCLI.installCommand),
 			Step(
-				id: "login", title: "Signed in to Claude", isDone: isSignedIn,
-				detail: account.map { $0.plan.map { "\($0) subscription" } ?? "Signed in" } ?? "Not signed in",
-				fixHint: "Sign in with your Claude subscription:",
-				fixCommand: "\(ClaudeCode.shellPath) auth login"),
+				id: "login", title: "Signed in to Antigravity", isDone: isSignedIn,
+				detail: account?.detail ?? "Not signed in",
+				fixHint: "Sign in with your Google account:",
+				fixCommand: AntigravityAuth.loginCommand),
 		]
 	}
 
 	static func check() async -> EngineStatus {
-		async let version = ClaudeCode.version()
-		async let account = ClaudeAuth.account()
-		return EngineStatus(claudeVersion: await version, account: await account)
+		async let version = AntigravityCLI.version()
+		async let account = AntigravityAuth.account()
+		return EngineStatus(agyVersion: await version, account: await account)
 	}
 }

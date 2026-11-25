@@ -8,8 +8,13 @@ bun fmt --check .
 swift format lint --strict -r src/swift tests/swift
 DEV=/Library/Developer/CommandLineTools/Library/Developer
 FLAGS=()
-[[ -d "$DEV/Frameworks/Testing.framework" ]] && FLAGS=(
-  -Xswiftc -F -Xswiftc "$DEV/Frameworks" -Xlinker -F -Xlinker "$DEV/Frameworks"
-  -Xlinker -rpath -Xlinker "$DEV/Frameworks" -Xlinker -rpath -Xlinker "$DEV/usr/lib"
-)
+if [[ -d "$DEV/Frameworks/Testing.framework" ]]; then
+  FLAGS=(
+    -Xswiftc -F -Xswiftc "$DEV/Frameworks" -Xlinker -F -Xlinker "$DEV/Frameworks"
+    -Xlinker -rpath -Xlinker "$DEV/Frameworks" -Xlinker -rpath -Xlinker "$DEV/usr/lib"
+  )
+  [[ ! -d "$DEV/Frameworks/_Testing_Foundation.framework/Modules" ]] && FLAGS+=(
+    -Xswiftc -Xfrontend -Xswiftc -disable-cross-import-overlays
+  )
+fi
 swift test "${FLAGS[@]}" 2>&1 | grep -E "✔|✘|error:|Test run"

@@ -12,6 +12,7 @@ let package = Package(
 				.linkedFramework("AppKit"),
 				.linkedFramework("AVFoundation"),
 				.linkedFramework("ServiceManagement"),
+				.linkedFramework("Speech"),
 			]
 		),
 		.testTarget(name: "BolTests", dependencies: ["Bol"], path: "tests/swift"),

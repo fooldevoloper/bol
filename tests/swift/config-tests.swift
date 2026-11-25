@@ -18,7 +18,7 @@ import Testing
 			"""
 		let config = try Config.decoded(data: Data(legacy.utf8))
 		#expect(config.isChromeEnabled == false)
-		#expect(config.claudeModel == .opus)
+		#expect(config.agentModel == .auto)
 		#expect(config.endOfSpeechSeconds == 1.1)
 		#expect(config.isFollowUpEnabled == false)
 		#expect(config.followUpSeconds == 9)

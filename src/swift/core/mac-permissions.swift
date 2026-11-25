@@ -1,17 +1,21 @@
 import AVFoundation
 import AppKit
 import ApplicationServices
+import Speech
 
-/// The macOS privacy permissions Bol uses. Child processes (the brain, Claude Code, osascript)
+/// The macOS privacy permissions Bol uses. Child processes (the brain, Antigravity CLI, osascript)
 /// inherit them from Bol.app. Automation prompts appear per app the first time Bol controls it.
 enum MacPermission: String, CaseIterable, Identifiable {
-	case microphone, accessibility, screenRecording, systemAudio, folders, fullDiskAccess
+	case microphone, speechRecognition, accessibility, screenRecording, systemAudio, folders, fullDiskAccess
+
+	static var hasSpeechRecognition: Bool { SFSpeechRecognizer.authorizationStatus() == .authorized }
 
 	var id: String { rawValue }
 
 	var title: String {
 		switch self {
 		case .microphone: return "Microphone"
+		case .speechRecognition: return "Speech Recognition"
 		case .accessibility: return "Accessibility"
 		case .screenRecording: return "Screen Recording"
 		case .systemAudio: return "System Audio Recording"
@@ -23,6 +27,7 @@ enum MacPermission: String, CaseIterable, Identifiable {
 	var icon: String {
 		switch self {
 		case .microphone: return "mic"
+		case .speechRecognition: return "waveform"
 		case .accessibility: return "accessibility"
 		case .screenRecording: return "rectangle.dashed"
 		case .systemAudio: return "speaker.wave.2"
@@ -35,6 +40,7 @@ enum MacPermission: String, CaseIterable, Identifiable {
 	var purpose: String {
 		switch self {
 		case .microphone: return "Hear you when you press \(ShortcutState.shared.talkText)"
+		case .speechRecognition: return "Transcribe your voice with Apple Speech on your Mac"
 		case .accessibility: return "Click, type and control apps for you"
 		case .screenRecording: return "See your screen when a request needs it"
 		case .systemAudio: return "Turn other apps down while you talk and Bol speaks"
@@ -64,13 +70,14 @@ enum MacPermission: String, CaseIterable, Identifiable {
 		switch self {
 		case .microphone: return .required
 		case .accessibility, .screenRecording, .folders: return .recommended
-		case .systemAudio, .fullDiskAccess: return .optional
+		case .speechRecognition, .systemAudio, .fullDiskAccess: return .optional
 		}
 	}
 
 	private var settingsAnchor: String {
 		switch self {
 		case .microphone: return "Privacy_Microphone"
+		case .speechRecognition: return "Privacy_SpeechRecognition"
 		case .accessibility: return "Privacy_Accessibility"
 		case .screenRecording: return "Privacy_ScreenCapture"
 		case .systemAudio: return "Privacy_AudioCapture"
@@ -91,6 +98,8 @@ enum MacPermission: String, CaseIterable, Identifiable {
 		switch self {
 		case .microphone:
 			return AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+		case .speechRecognition:
+			return Self.hasSpeechRecognition
 		case .accessibility:
 			return AXIsProcessTrusted()
 		case .screenRecording:
@@ -115,6 +124,12 @@ enum MacPermission: String, CaseIterable, Identifiable {
 		case .microphone:
 			switch AVCaptureDevice.authorizationStatus(for: .audio) {
 			case .notDetermined: AVCaptureDevice.requestAccess(for: .audio) { _ in }
+			case .denied, .restricted, .authorized: openSettings()
+			@unknown default: openSettings()
+			}
+		case .speechRecognition:
+			switch SFSpeechRecognizer.authorizationStatus() {
+			case .notDetermined: SFSpeechRecognizer.requestAuthorization { _ in }
 			case .denied, .restricted, .authorized: openSettings()
 			@unknown default: openSettings()
 			}

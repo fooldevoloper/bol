@@ -591,37 +591,16 @@ final class Controller {
 		session.onError = { [weak self, weak current] problem in
 			guard let self, let current, current === self.listening else { return }
 			Log.info(message: "stt error: \(problem.title): \(problem.detail)")
-			if provider.id == .claude, problem.isOutage { SpeechToTextOutage.record(problem: problem) }
-			if provider.id == .claude {
-				Task { @MainActor in ServiceHealth.shared.report(item: .speechToText, problem: problem) }
-			}
+			Task { @MainActor in ServiceHealth.shared.report(item: .speechToText, problem: problem) }
 			guard current.rawText.isEmpty else { return }
 			self.abortListening()
 			self.goIdle()
-			let hasFallback =
-				provider.id == .claude && problem.isOutage
-				&& SpeechToTextProviders.active(config: self.config).id != .claude
-			self.hud.error(
-				title: problem.title,
-				detail: hasFallback ? "Press ⌘J to try again: Bol will listen with OpenAI for now." : problem.detail)
+			self.hud.error(title: problem.title, detail: problem.detail)
 		}
 
 		Task { @MainActor [weak self] in
-			let token: String?
-			switch provider.credential {
-			case .claudeSubscription: token = await ClaudeAuth.accessToken(isUserAction: true)
-			case .none, .apiKey: token = nil
-			}
 			guard let self, current === self.listening else { return }
-			if provider.credential == .claudeSubscription, token == nil {
-				self.abortListening()
-				self.goIdle()
-				self.hud.error(
-					title: "Not signed in to Claude Code",
-					detail: "Sign in from Settings → Assistant, or run `claude auth login` in Terminal.")
-				return
-			}
-			session.start(claudeToken: token)
+			session.start()
 			self.audioQueue.async {
 				// Send what was captured while connecting.
 				let elapsed =

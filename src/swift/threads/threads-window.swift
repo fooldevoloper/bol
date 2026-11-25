@@ -271,7 +271,7 @@ struct ThreadsView: View {
 		let alert = NSAlert()
 		alert.messageText = "Delete “\(thread.title.count > 60 ? thread.title.prefix(60) + "…" : thread.title)”?"
 		alert.informativeText =
-			"The conversation\(taskCount == 0 ? "" : " and its \(taskCount) task\(taskCount == 1 ? "" : "s")") will be deleted from this Mac, Bol's copy and Claude Code's. This can't be undone."
+			"The conversation\(taskCount == 0 ? "" : " and its \(taskCount) task\(taskCount == 1 ? "" : "s")") will be deleted from Bol's archive on this Mac. This can't be undone."
 			+ (thread.id == store.currentId ? " Bol starts a new conversation." : "")
 		alert.addButton(withTitle: "Delete")
 		alert.addButton(withTitle: "Cancel")

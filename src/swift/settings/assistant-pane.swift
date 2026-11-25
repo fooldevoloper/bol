@@ -10,7 +10,7 @@ struct AssistantPane: View {
 	@ObservedObject var model: SettingsModel
 	private let tick = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
-	/// Settings only shows panes once Claude Code is ready (see SettingsView), so the engine is known here.
+	/// Settings only shows panes once Antigravity CLI is ready (see SettingsView), so the engine is known here.
 	var body: some View {
 		if let engine = model.engine { content(engine: engine) }
 	}
@@ -24,9 +24,9 @@ struct AssistantPane: View {
 					.frame(width: 36, height: 36)
 					.background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 				VStack(alignment: .leading, spacing: 3) {
-					Text("Powered by Claude Code · Agent SDK").font(.system(size: 14, weight: .semibold))
+					Text("Powered by Antigravity · ACP").font(.system(size: 14, weight: .semibold))
 					Text(
-						"Everything Bol thinks and does runs in a Claude Code session through the Claude Agent SDK, on your \(e.account?.plan ?? "Claude") subscription. No API key is used."
+						"Everything Bol thinks and does runs in an Antigravity session through `agy acp` using your active Google / Antigravity sign-in."
 					)
 					.font(UI.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 				}
@@ -34,13 +34,13 @@ struct AssistantPane: View {
 			}
 			.padding(14)
 			SettingsRow(
-				"Claude Code", icon: "terminal",
-				help: ClaudeCode.executable?.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+				"Antigravity CLI", icon: "terminal",
+				help: AntigravityCLI.executable?.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
 			) {
-				Text("v\(e.claudeVersion ?? "?")").font(UI.body.monospacedDigit()).foregroundStyle(.secondary)
+				Text("v\(e.agyVersion ?? "?")").font(UI.body.monospacedDigit()).foregroundStyle(.secondary)
 			}
 			SettingsRow("Account", icon: "person.crop.circle") {
-				StatusDot(text: "\(e.account?.plan ?? "Claude") · signed in", color: .green)
+				StatusDot(text: "\(e.account?.detail ?? "Antigravity") · signed in", color: .green)
 			}
 		}
 	}
@@ -49,27 +49,27 @@ struct AssistantPane: View {
 		VStack(alignment: .leading, spacing: 22) {
 			engineCard(engine: engine)
 			HealthCard(model: model)
-			UsageCard(model: model)
-			SettingsGroup(title: "Claude") {
+			SettingsGroup(title: "Antigravity") {
 				SettingsRow("Model", icon: "sparkle") {
 					Select(
-						options: Self.claudeModels,
+						options: Self.agentModels,
 						selection: Binding(
-							get: { model.config.claudeModel.rawValue },
-							set: { model.config.claudeModel = ClaudeModel(rawValue: $0) ?? .opus }))
+							get: { model.config.agentModel.rawValue },
+							set: { model.config.agentModel = AgentModel(rawValue: $0) ?? .auto }))
 				}
 				SettingsRow(
-					"Effort", icon: "gauge.with.dots.needle.50percent", help: "How hard Claude thinks before answering"
+					"Effort", icon: "gauge.with.dots.needle.50percent",
+					help: "How hard Antigravity thinks before answering"
 				) {
 					Select(
 						options: Self.efforts,
 						selection: Binding(
-							get: { model.config.claudeEffort.rawValue },
-							set: { model.config.claudeEffort = ClaudeEffort(rawValue: $0) ?? .medium }))
+							get: { model.config.agentEffort.rawValue },
+							set: { model.config.agentEffort = AgentEffort(rawValue: $0) ?? .medium }))
 				}
 				SettingsRow(
 					"Working folder", icon: "folder",
-					help: "Where commands start. Bol's own folder keeps its threads out of your Claude Code history"
+					help: "Where commands start. Bol's own folder keeps its threads in ~/.bol/workspace"
 				) {
 					HStack(spacing: 8) {
 						Text(
@@ -137,10 +137,10 @@ struct AssistantPane: View {
 		.onReceive(tick) { _ in model.refreshPermissions() }
 	}
 
-	static let claudeModels = ClaudeModel.allCases.map {
+	static let agentModels = AgentModel.allCases.map {
 		SelectOption(id: $0.rawValue, title: $0.title, subtitle: $0.subtitle)
 	}
-	static let efforts = ClaudeEffort.allCases.map {
+	static let efforts = AgentEffort.allCases.map {
 		SelectOption(id: $0.rawValue, title: $0.title, subtitle: $0.subtitle)
 	}
 
@@ -228,9 +228,8 @@ struct HealthCard: View {
 	}
 
 	private var footer: String? {
-		guard case .problem = health.status(item: .speechToText) else { return nil }
-		return
-			"Listening uses the speech-to-text behind Claude Code's /voice, which isn't a public Anthropic API and can change without notice."
+		guard case .problem(let problem) = health.status(item: .speechToText) else { return nil }
+		return problem.detail
 	}
 
 	private var trailing: some View {
@@ -273,11 +272,11 @@ struct HealthCard: View {
 	private func fixButton(fix: ServiceProblem.Fix) -> AnyView? {
 		let (title, action): (String, () -> Void)
 		switch fix {
-		case .useOpenAIForListening:
-			(title, action) = ("Use OpenAI", { paneRaw = Pane.listening.rawValue })
-		case .signInToClaude:
-			(title, action) = ("Sign In", { Terminal.run(command: "\(ClaudeCode.shellPath) auth login") })
-		case .installClaudeCode:
+		case .useAppleOrOpenAIForListening:
+			(title, action) = ("Listening Settings", { paneRaw = Pane.listening.rawValue })
+		case .signInToAntigravity:
+			(title, action) = ("Sign In", { Terminal.run(command: AntigravityAuth.loginCommand) })
+		case .installAntigravityCLI:
 			(title, action) = ("Run Setup", { model.onRunSetup?() })
 		case .tryAgain, .checkConnection:
 			(title, action) = ("Try Again", { health.run(config: model.config) })
@@ -288,95 +287,7 @@ struct HealthCard: View {
 	}
 }
 
-/// Claude plan usage (same numbers as Claude Code's /usage).
-struct UsageCard: View {
-	@ObservedObject var model: SettingsModel
-	private let refresh = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-
-	var body: some View {
-		SettingsGroup(title: "Plan usage", trailing: AnyView(trailing)) {
-			if model.usage.isEmpty {
-				SettingsRow(model.usageError == nil ? "Loading usage…" : "Usage unavailable", icon: "chart.bar") {
-					if model.isLoadingUsage {
-						ProgressView().controlSize(.small)
-					} else if let e = model.usageError {
-						Text(e).font(UI.caption).foregroundStyle(.secondary)
-					}
-				}
-			}
-			ForEach(model.usage) { limit in
-				UsageRow(limit: limit)
-			}
-		}
-		.onAppear { model.loadUsage() }
-		.onReceive(refresh) { _ in model.loadUsage() }
-	}
-
-	private var trailing: some View {
-		HStack(spacing: 8) {
-			if let t = model.usageUpdatedAt {
-				TimelineView(.periodic(from: t, by: 30)) { ctx in
-					Text(updatedText(updatedAt: t, now: ctx.date)).font(UI.caption).foregroundStyle(.tertiary)
-				}
-			}
-			IconButton(symbol: "arrow.clockwise", help: "Refresh", isSpinning: model.isLoadingUsage) {
-				model.loadUsage()
-			}
-			IconButton(symbol: "arrow.up.forward.square", help: "Open usage on claude.ai") {
-				NSWorkspace.shared.open(URL(string: "https://claude.ai/settings/usage")!)
-			}
-		}
-	}
-
-	private func updatedText(updatedAt t: Date, now: Date) -> String {
-		let s = Int(now.timeIntervalSince(t))
-		return s < 45 ? "Updated just now" : "Updated \(s / 60)m ago"
-	}
-}
-
-struct UsageRow: View {
-	let limit: PlanLimit
-	@State private var shown: Double = 0
-
-	private var tint: Color {
-		switch limit.severity {
-		case .critical: return .red
-		case .warning: return .orange
-		case .normal: return limit.percent >= 90 ? .red : limit.percent >= 75 ? .orange : .green
-		}
-	}
-
-	var body: some View {
-		VStack(alignment: .leading, spacing: 8) {
-			HStack(alignment: .firstTextBaseline) {
-				Text(limit.title).font(UI.body)
-				if limit.isActive {
-					Text("Active").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-						.padding(.horizontal, 5).padding(.vertical, 1)
-						.background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 4))
-				}
-				Spacer()
-				Text("\(Int(limit.percent.rounded()))% used").font(UI.body.monospacedDigit())
-					.foregroundStyle(limit.percent >= 75 ? tint : .secondary)
-			}
-			GeometryReader { geo in
-				ZStack(alignment: .leading) {
-					Capsule().fill(Color.primary.opacity(0.08))
-					Capsule().fill(tint.gradient)
-						.frame(width: max(limit.percent > 0 ? 4 : 0, geo.size.width * min(1, shown / 100)))
-				}
-			}
-			.frame(height: 6)
-			Text(PlanUsage.resetText(date: limit.resetsAt)).font(UI.caption).foregroundStyle(.secondary)
-		}
-		.padding(.horizontal, 14)
-		.padding(.vertical, 12)
-		.onAppear { withAnimation(.easeOut(duration: 0.6)) { shown = limit.percent } }
-		.onChange(of: limit.percent) { v in withAnimation(.easeOut(duration: 0.4)) { shown = v } }
-	}
-}
-
-/// The instructions Bol adds on top of Claude Code's own system prompt.
+/// The instructions Bol adds on top of Antigravity's system prompt.
 struct InstructionsEditor: View {
 	@ObservedObject var model: SettingsModel
 	@State private var draft = ""
@@ -391,7 +302,7 @@ struct InstructionsEditor: View {
 		SettingsGroup(
 			title: "Instructions",
 			footer:
-				"Sent with every session, on top of Claude Code's own system prompt. Bol always adds its safety rules too: deleted files go to the Trash, never away for good. Applying restarts the brain; the conversation continues.",
+				"Sent with every session, on top of Antigravity's own system prompt. Bol always adds its safety rules too: deleted files go to the Trash, never away for good. Applying restarts the brain; the conversation continues.",
 			trailing: AnyView(badge)
 		) {
 			VStack(alignment: .leading, spacing: 10) {
@@ -453,7 +364,7 @@ struct InstructionsEditor: View {
 	}
 }
 
-/// Shown instead of the Assistant settings when Claude Code / the Agent SDK isn't usable.
+/// Shown instead of the Assistant settings when Antigravity CLI isn't usable.
 struct EngineSetupView: View {
 	@ObservedObject var model: SettingsModel
 	let status: EngineStatus
@@ -467,9 +378,9 @@ struct EngineSetupView: View {
 					.foregroundStyle(.secondary)
 					.frame(width: 52, height: 52)
 					.background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-				Text("Claude Code isn't ready").font(.system(size: 17, weight: .semibold))
+				Text("Antigravity CLI isn't ready").font(.system(size: 17, weight: .semibold))
 				Text(
-					"Bol thinks and acts through Claude Code and your Claude subscription. Finish the steps below; Bol starts as soon as both are done."
+					"Bol thinks and acts through Antigravity (`agy`) and your Google account sign-in. Finish the steps below; Bol starts as soon as both are done."
 				)
 				.font(UI.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 			}

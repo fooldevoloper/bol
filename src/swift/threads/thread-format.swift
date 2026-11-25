@@ -4,14 +4,33 @@ enum ToolStyle {
 	/// Monochrome SF Symbols per kind of tool.
 	static func icon(name: String) -> String {
 		let lower = name.lowercased()
-		if name == "Bash" || name.hasPrefix("Bash") { return "terminal" }
-		if name == "Read" { return "doc.text" }
-		if name == "Write" || name == "Edit" || name == "MultiEdit" || name == "NotebookEdit" {
+		if name == "Bash" || name.hasPrefix("Bash") || name == "run_command" || name == "command_status"
+			|| name == "send_command_input"
+		{
+			return "terminal"
+		}
+		if name == "Read" || name == "view_file" || name == "view_file_outline" || name == "view_code_item" {
+			return "doc.text"
+		}
+		if name == "Write" || name == "Edit" || name == "MultiEdit" || name == "NotebookEdit" || name == "write_to_file"
+			|| name == "create_file" || name == "replace_file_content" || name == "multi_replace_file_content"
+			|| name == "edit_file"
+		{
 			return "square.and.pencil"
 		}
-		if name == "Glob" || name == "Grep" || name == "ToolSearch" { return "magnifyingglass" }
-		if name == "WebSearch" || name == "WebFetch" { return "globe" }
-		if name == "Agent" || name == "Task" { return "person.2" }
+		if name == "Glob" || name == "Grep" || name == "ToolSearch" || name == "find_by_name" || name == "find_file"
+			|| name == "grep_search" || name == "search_directory" || name == "list_dir" || name == "list_directory"
+		{
+			return "magnifyingglass"
+		}
+		if name == "WebSearch" || name == "WebFetch" || name == "search_web" || name == "read_url_content" {
+			return "globe"
+		}
+		if name == "Agent" || name == "Task" || name == "invoke_subagent" || name == "start_subagent"
+			|| lower.contains("start_task") || lower.contains("message_task")
+		{
+			return "person.2"
+		}
 		if name == "TodoWrite" { return "checklist" }
 		if lower.contains("chrome") { return "safari" }
 		if lower.contains("screenshot") || lower.contains("look_at_screen") || lower.contains("zoom") {
@@ -39,11 +58,16 @@ enum Format {
 	}
 
 	static func model(id: String) -> String {
-		// claude-opus-5-5 → Opus 5.5
-		let parts = id.replacingOccurrences(of: "claude-", with: "").split(separator: "-")
-		guard let family = parts.first else { return id }
-		let version = parts.dropFirst().prefix { $0.allSatisfy(\.isNumber) && $0.count <= 2 }.joined(separator: ".")
-		return family.prefix(1).uppercased() + family.dropFirst() + (version.isEmpty ? "" : " \(version)")
+		// e.g. gemini-4-hydrogen -> Gemini 4 Hydrogen, claude-opus-5-5 -> Opus 5.5
+		if id.hasPrefix("claude-") {
+			let parts = id.replacingOccurrences(of: "claude-", with: "").split(separator: "-")
+			guard let family = parts.first else { return id }
+			let version = parts.dropFirst().prefix { $0.allSatisfy(\.isNumber) && $0.count <= 2 }.joined(separator: ".")
+			return family.prefix(1).uppercased() + family.dropFirst() + (version.isEmpty ? "" : " \(version)")
+		}
+		return id.split(separator: "-")
+			.map { $0.prefix(1).uppercased() + $0.dropFirst() }
+			.joined(separator: " ")
 	}
 
 	static func relative(date: Date, now: Date) -> String {

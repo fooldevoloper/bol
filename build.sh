@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds Bol.app into ./build. Running it needs only Claude Code (the app's setup checks for it).
+# Builds Bol.app into ./build. Running it needs only Antigravity CLI (the app's setup checks for it).
 # Usage: ./build.sh [--install] [--run]
 # Bun and Swift are needed to build only: the brain ships as a single compiled executable.
 # Env: BOL_VERSION / BOL_BUILD (Info.plist versions; release.sh sets them), BOL_SIGN_IDENTITY (a "Developer ID
@@ -77,6 +77,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Bol listens to your voice when you press ⌘J.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Bol uses macOS Speech Recognition when Apple Speech listening is enabled.</string>
   <key>NSAudioCaptureUsageDescription</key><string>Bol turns other apps' sound down while you talk to it and while it speaks.</string>
   <key>NSAppleEventsUsageDescription</key><string>Bol controls other apps on your behalf when you ask it to.</string>
 </dict>

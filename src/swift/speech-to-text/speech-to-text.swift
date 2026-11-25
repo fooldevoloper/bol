@@ -2,19 +2,38 @@ import SwiftUI
 
 // Speech-to-text providers are plugins. To add one:
 //  1. add a case to `SpeechToTextProviderID`,
-//  2. write a `SpeechToTextProvider` in Providers/ (its session, settings and settings UI),
+//  2. write a `SpeechToTextProvider` in providers/ (its session, settings and settings UI),
 //  3. return it from `SpeechToTextProviders.provider(id:)`, and add its settings to
 //     `SpeechToTextSettings` if it has any.
 // The compiler points at every switch that must handle the new case.
 
 enum SpeechToTextProviderID: String, Codable, CaseIterable, Identifiable {
-	case claude, openai
+	case apple, gemini, openai
 	var id: String { rawValue }
+
+	init(from decoder: Decoder) throws {
+		let raw = try decoder.singleValueContainer().decode(String.self)
+		self = SpeechToTextProviderID(rawValue: raw) ?? .apple
+	}
 }
 
 struct SpeechToTextSettings: Codable, Equatable {
-	var provider = SpeechToTextProviderID.claude
+	var provider = SpeechToTextProviderID.apple
+	var apple = AppleSpeechToText.Settings()
+	var gemini = GeminiSpeechToText.Settings()
 	var openai = OpenAISpeechToText.Settings()
+
+	init() {}
+
+	init(from decoder: Decoder) throws {
+		let c = try decoder.container(keyedBy: CodingKeys.self)
+		provider = try c.decodeIfPresent(SpeechToTextProviderID.self, forKey: .provider) ?? .apple
+		apple = try c.decodeIfPresent(AppleSpeechToText.Settings.self, forKey: .apple) ?? AppleSpeechToText.Settings()
+		gemini =
+			try c.decodeIfPresent(GeminiSpeechToText.Settings.self, forKey: .gemini) ?? GeminiSpeechToText.Settings()
+		openai =
+			try c.decodeIfPresent(OpenAISpeechToText.Settings.self, forKey: .openai) ?? OpenAISpeechToText.Settings()
+	}
 }
 
 protocol SpeechToTextProvider {
@@ -32,22 +51,18 @@ protocol SpeechToTextProvider {
 enum SpeechToTextProviders {
 	static func provider(id: SpeechToTextProviderID) -> SpeechToTextProvider {
 		switch id {
-		case .claude: return ClaudeSpeechToText()
+		case .apple: return AppleSpeechToText()
+		case .gemini: return GeminiSpeechToText()
 		case .openai: return OpenAISpeechToText()
 		}
 	}
 
 	static var all: [SpeechToTextProvider] { SpeechToTextProviderID.allCases.map { provider(id: $0) } }
 
-	/// The provider actually used: one whose credential is missing falls back to Claude (included with the
-	/// subscription), and while Claude's is out (see `ServiceHealth`) Bol listens with OpenAI if it has a key.
+	/// The provider actually used: one whose credential is missing falls back to Apple Speech (built in).
 	static func active(config: Config) -> SpeechToTextProvider {
 		let chosen = provider(id: config.speechToText.provider)
-		let openAI = OpenAISpeechToText()
-		if chosen.id == .claude, SpeechToTextOutage.current != nil, openAI.credential.isSatisfied(by: config) {
-			return openAI
-		}
-		return chosen.credential.isSatisfied(by: config) ? chosen : ClaudeSpeechToText()
+		return chosen.credential.isSatisfied(by: config) ? chosen : AppleSpeechToText()
 	}
 }
 
@@ -67,8 +82,7 @@ protocol SpeechToTextSession: AnyObject {
 	/// Whether text arrives while the user is still speaking.
 	var isStreamingInterim: Bool { get }
 
-	/// `claudeToken` is set when the provider's credential is `.claudeSubscription`.
-	func start(claudeToken: String?)
+	func start()
 	func send(pcm: Data)
 	func flush()
 	func cancel()

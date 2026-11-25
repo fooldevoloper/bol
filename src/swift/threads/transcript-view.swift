@@ -96,7 +96,7 @@ private struct ContextMeter: View {
 			.frame(width: 120, height: 4)
 		}
 		.help(
-			"Tokens in the conversation on its latest request. Claude Code compacts automatically (summarizes earlier turns) as it nears the limit."
+			"Tokens in the conversation on its latest request. Antigravity compacts automatically as it nears the limit."
 		)
 	}
 }
@@ -246,7 +246,7 @@ private struct EntryView: View {
 							+ (tokensBefore.map { " · \(Format.tokens($0)) tokens summarized" } ?? ""))
 				}
 			case .summary(let text):
-				Disclosure(title: "Summary Claude Code carried forward", isExpanded: $isSummaryExpanded) {
+				Disclosure(title: "Summary carried forward", isExpanded: $isSummaryExpanded) {
 					CodeBlock(text: text, limit: 6000)
 				}
 			case .user, .assistant, .tool, .task:

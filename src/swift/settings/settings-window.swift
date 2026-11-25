@@ -15,12 +15,12 @@ struct SettingsView: View {
 
 	private var pane: Pane { Pane(rawValue: paneRaw) ?? .assistant }
 
-	/// Re-checks Claude Code while it's blocking, so Settings unlocks by itself after sign-in.
+	/// Re-checks Antigravity while it's blocking, so Settings unlocks by itself after sign-in.
 	private let engineRecheck = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
 	var body: some View {
 		Group {
-			// Claude Code not ready blocks all of Settings: nothing else works without it.
+			// Antigravity not ready blocks all of Settings: nothing else works without it.
 			switch model.engine?.isReady {
 			case true?: panes
 			case false?: blocker
@@ -38,7 +38,7 @@ struct SettingsView: View {
 	private var checking: some View {
 		HStack(spacing: 10) {
 			ProgressView().controlSize(.small)
-			Text("Checking Claude Code…").font(UI.body).foregroundStyle(.secondary)
+			Text("Checking Antigravity CLI…").font(UI.body).foregroundStyle(.secondary)
 		}
 		.frame(maxWidth: .infinity, maxHeight: .infinity)
 	}

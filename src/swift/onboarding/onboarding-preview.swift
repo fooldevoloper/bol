@@ -6,48 +6,52 @@ enum OnboardingPreview {
 	@MainActor static func render(to directory: String) {
 		let states:
 			[(
-				name: String, step: OnboardingStep, claudeCode: ClaudeCodeCheck, account: AccountCheck,
+				name: String, step: OnboardingStep, antigravityCLI: AntigravityCLICheck, account: AccountCheck,
 				speech: SpeechTest, dictationApps: [DictationApp]?
 			)] = [
 				("1-welcome", .welcome, .checking, .checking, .idle, nil),
-				("2-claude-missing", .claudeCode, .missing, .checking, .idle, nil),
-				("3-claude-installed", .claudeCode, .installed(version: "2.1.325"), .checking, .idle, nil),
-				("4-account-signed-out", .account, .installed(version: "2.1.325"), .signedOut, .idle, nil),
-				("5-account-ready", .account, .installed(version: "2.1.325"), .ready(plan: "Claude Max"), .idle, nil),
+				("2-agy-missing", .antigravityCLI, .missing, .checking, .idle, nil),
+				("3-agy-installed", .antigravityCLI, .installed(version: "1.5.17"), .checking, .idle, nil),
+				("4-account-signed-out", .account, .installed(version: "1.5.17"), .signedOut, .idle, nil),
 				(
-					"6-mic-listening", .microphone, .installed(version: "2.1.325"), .ready(plan: "Claude Max"),
+					"5-account-ready", .account, .installed(version: "1.5.17"), .ready(detail: "user@gmail.com"), .idle,
+					nil
+				),
+				(
+					"6-mic-listening", .microphone, .installed(version: "1.5.17"), .ready(detail: "user@gmail.com"),
 					.listening(heard: "Hello Bol, what time"), nil
 				),
 				(
-					"7-mic-passed", .microphone, .installed(version: "2.1.325"), .ready(plan: "Claude Max"),
+					"7-mic-passed", .microphone, .installed(version: "1.5.17"), .ready(detail: "user@gmail.com"),
 					.passed(heard: "Hello Bol, what time is it?"), nil
 				),
 				(
-					"8-voice", .voice, .installed(version: "2.1.325"), .ready(plan: "Claude Max"),
+					"8-voice", .voice, .installed(version: "1.5.17"), .ready(detail: "user@gmail.com"),
 					.passed(heard: "Hello"), nil
 				),
 				(
-					"9-dictation", .dictation, .installed(version: "2.1.325"), .ready(plan: "Claude Max"),
+					"9-dictation", .dictation, .installed(version: "1.5.17"), .ready(detail: "user@gmail.com"),
 					.passed(heard: "Hello"), []
 				),
 				(
-					"9b-dictation-other-apps", .dictation, .installed(version: "2.1.325"), .ready(plan: "Claude Max"),
+					"9b-dictation-other-apps", .dictation, .installed(version: "1.5.17"),
+					.ready(detail: "user@gmail.com"),
 					.passed(heard: "Hello"), [DictationApps.known[0], DictationApps.known[1]]
 				),
 				(
-					"10-permissions", .permissions, .installed(version: "2.1.325"), .ready(plan: "Claude Max"),
+					"10-permissions", .permissions, .installed(version: "1.5.17"), .ready(detail: "user@gmail.com"),
 					.passed(heard: "Hello"), nil
 				),
 				(
-					"11-autonomy", .autonomy, .installed(version: "2.1.325"), .ready(plan: "Claude Max"),
+					"11-autonomy", .autonomy, .installed(version: "1.5.17"), .ready(detail: "user@gmail.com"),
 					.passed(heard: "Hello"), nil
 				),
 				(
-					"13-terms", .terms, .installed(version: "2.1.325"), .ready(plan: "Claude Max"),
+					"13-terms", .terms, .installed(version: "1.5.17"), .ready(detail: "user@gmail.com"),
 					.passed(heard: "Hello"), nil
 				),
 				(
-					"12-ready", .ready, .installed(version: "2.1.325"), .ready(plan: "Claude Max"),
+					"12-ready", .ready, .installed(version: "1.5.17"), .ready(detail: "user@gmail.com"),
 					.passed(heard: "Hello"), nil
 				),
 			]
@@ -56,7 +60,7 @@ enum OnboardingPreview {
 			let settings = SettingsModel(config: Config())
 			let model = OnboardingModel(settings: settings)
 			model.setPreviewState(
-				step: state.step, claudeCode: state.claudeCode, account: state.account, microphone: .authorized,
+				step: state.step, antigravityCLI: state.antigravityCLI, account: state.account, microphone: .authorized,
 				speechTest: state.speech, dictationApps: state.dictationApps)
 			let host = NSHostingView(
 				rootView: OnboardingView(model: model, settings: settings)

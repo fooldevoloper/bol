@@ -11,7 +11,7 @@ enum Shell {
 	static var augmentedPath: String {
 		let home = NSHomeDirectory()
 		let extra = [
-			"\(home)/.local/bin", "\(home)/.claude/local", "\(home)/.bun/bin", "/opt/homebrew/bin", "/usr/local/bin",
+			"\(home)/.local/bin", "\(home)/.gemini/bin", "\(home)/.bun/bin", "/opt/homebrew/bin", "/usr/local/bin",
 			"/usr/bin", "/bin",
 			"/usr/sbin",
 			"/sbin",

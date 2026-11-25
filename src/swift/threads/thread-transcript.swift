@@ -123,8 +123,11 @@ enum TranscriptParser {
 				guard let message else { break }
 				if let model = message["model"] as? String, model != "<synthetic>" { transcript.model = model }
 				if let usage = message["usage"] as? [String: Any] {
-					let total = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
-						.compactMap { usage[$0] as? Int }.reduce(0, +)
+					let total = [
+						"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+						"inputTokens", "cachedReadTokens", "cachedWriteTokens",
+					]
+					.compactMap { usage[$0] as? Int }.reduce(0, +)
 					if total > 0 { transcript.contextTokens = total }
 				}
 				for (i, block) in blocks(message["content"]).enumerated() {
@@ -137,8 +140,10 @@ enum TranscriptParser {
 						let name = block["name"] as? String ?? "tool"
 						let input = block["input"] as? [String: Any] ?? [:]
 						toolIndex[id] = transcript.items.count
-						if name == "mcp__bol__start_task" || name == "mcp__bol__message_task" {
-							let isStart = name == "mcp__bol__start_task"
+						if name == "mcp_bol_start_task" || name == "mcp_bol_message_task"
+							|| name == "mcp__bol__start_task" || name == "mcp__bol__message_task"
+						{
+							let isStart = name == "mcp_bol_start_task" || name == "mcp__bol__start_task"
 							append(
 								id: id,
 								kind: .task(
@@ -270,13 +275,23 @@ enum TranscriptParser {
 		return (rest.joined(separator: "\n\n"), notes)
 	}
 
-	/// A tool's display name: `mcp__bol__screenshot` → "screenshot", `mcp__github__get_issue` → "github · get_issue".
+	/// A tool's display name: `mcp_bol_screenshot` / `mcp__bol__screenshot` → "screenshot".
 	static func displayName(tool name: String) -> String {
-		let parts = name.components(separatedBy: "__")
-		guard parts.count >= 3, parts[0] == "mcp" else { return name }
-		let server = parts[1]
-		let tool = parts[2...].joined(separator: "__")
-		return server == "bol" ? tool.replacingOccurrences(of: "_", with: " ") : "\(server) · \(tool)"
+		if name.hasPrefix("mcp_bol_") {
+			return String(name.dropFirst("mcp_bol_".count)).replacingOccurrences(of: "_", with: " ")
+		}
+		if name.hasPrefix("mcp__bol__") {
+			return String(name.dropFirst("mcp__bol__".count)).replacingOccurrences(of: "_", with: " ")
+		}
+		let doubleParts = name.components(separatedBy: "__")
+		if doubleParts.count >= 3, doubleParts[0] == "mcp" {
+			return "\(doubleParts[1]) · \(doubleParts[2...].joined(separator: "__"))"
+		}
+		if name.hasPrefix("mcp_") {
+			let parts = name.dropFirst("mcp_".count).split(separator: "_", maxSplits: 1).map(String.init)
+			if parts.count == 2 { return "\(parts[0]) · \(parts[1])" }
+		}
+		return name
 	}
 
 	/// A step as a short phrase, the way t3code's work log reads: "Read hud.swift", "Edited config.swift",
@@ -290,16 +305,27 @@ enum TranscriptParser {
 		let summary = summarize(name: name, input: input)
 		switch name {
 		case "Bash": return string("description") ?? string("command").map { "Ran \($0)" } ?? "Ran a command"
+		case "run_command":
+			return string("CommandLine").map { "Ran \($0)" } ?? "Ran a command"
 		case "Read": return file("file_path").map { "Read \($0)" } ?? "Read a file"
+		case "view_file": return file("AbsolutePath").map { "Read \($0)" } ?? "Read a file"
 		case "Edit", "MultiEdit", "NotebookEdit": return file("file_path").map { "Edited \($0)" } ?? "Edited a file"
+		case "edit_file", "replace_file_content", "multi_replace_file_content":
+			return file("TargetFile").map { "Edited \($0)" } ?? "Edited a file"
 		case "Write": return file("file_path").map { "Wrote \($0)" } ?? "Wrote a file"
-		case "Grep": return string("pattern").map { "Searched for “\($0)”" } ?? "Searched files"
-		case "Glob": return string("pattern").map { "Listed \($0)" } ?? "Listed files"
-		case "WebSearch": return string("query").map { "Searched the web for “\($0)”" } ?? "Searched the web"
-		case "WebFetch":
-			let host = string("url").flatMap { URL(string: $0)?.host }
+		case "create_file", "write_to_file":
+			return (file("TargetFile") ?? file("file_path")).map { "Wrote \($0)" } ?? "Wrote a file"
+		case "Grep", "grep_search":
+			return (string("pattern") ?? string("Query")).map { "Searched for “\($0)”" } ?? "Searched files"
+		case "Glob", "find_by_name", "find_file", "list_dir", "list_directory":
+			return (string("pattern") ?? string("Pattern")).map { "Listed \($0)" } ?? "Listed files"
+		case "WebSearch", "search_web":
+			return (string("query") ?? string("Query")).map { "Searched the web for “\($0)”" } ?? "Searched the web"
+		case "WebFetch", "read_url_content":
+			let host = (string("url") ?? string("Url")).flatMap { URL(string: $0)?.host }
 			return host.map { "Read \($0)" } ?? "Read a web page"
-		case "Agent", "Task": return string("description").map { "Agent: \($0)" } ?? "Ran an agent"
+		case "Agent", "Task", "invoke_subagent", "start_subagent":
+			return (string("description") ?? string("Role")).map { "Agent: \($0)" } ?? "Ran an agent"
 		case "TodoWrite": return "Updated the plan"
 		case "ToolSearch": return "Looked up tools"
 		default:

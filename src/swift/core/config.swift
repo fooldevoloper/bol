@@ -26,13 +26,13 @@ struct Config: Codable, Equatable {
 
 	var isChromeEnabled = true
 	var screenAccess = ScreenAccess.auto
-	var claudeModel = ClaudeModel.opus
-	var claudeEffort = ClaudeEffort.medium
+	var agentModel = AgentModel.auto
+	var agentEffort = AgentEffort.medium
 	/// nil = Bol's own workspace (~/.bol/workspace), which keeps its sessions apart from yours.
 	var workingDirectory: String? = nil
 	/// Download new versions in the background and install them when Bol is idle (Settings → General).
 	var isAutoUpdateEnabled = true
-	/// The first-run setup was finished (it checks Claude Code, the login, the mic and the voice).
+	/// The first-run setup was finished (it checks Antigravity CLI, sign-in, the mic and the voice).
 	var hasCompletedOnboarding = false
 	/// The Terms and Privacy Policy the user agreed to in setup, and when. Kept only on this Mac.
 	var acceptedTerms: AcceptedTerms? = nil
@@ -51,39 +51,46 @@ struct AcceptedTerms: Codable, Equatable {
 	}
 }
 
-/// The frontier models Bol offers. A stored choice that isn't one of them (older builds offered
-/// Sonnet, Haiku and "Claude Code's default") becomes Opus.
-enum ClaudeModel: String, Codable, CaseIterable {
-	case opus = "claude-opus-5-5"
-	case fable = "claude-fable-5-2"
+/// The models Antigravity offers via ACP. Unknown stored values fall back to `auto`.
+enum AgentModel: String, Codable, CaseIterable {
+	case auto = "default"
+	case geminiHydrogen = "gemini-4-hydrogen"
+	case geminiFlash = "gemini-3.8-flash"
+	case claudeSonnet = "claude-sonnet-4-6"
+	case claudeOpus = "claude-opus-4-6-thinking"
 
 	init(from decoder: Decoder) throws {
-		self = ClaudeModel(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .opus
+		self = AgentModel(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .auto
 	}
 
 	var title: String {
 		switch self {
-		case .opus: return "Claude Opus 5.5"
-		case .fable: return "Claude Fable 5.2"
+		case .auto: return "Antigravity default"
+		case .geminiHydrogen: return "Gemini 4 Hydrogen"
+		case .geminiFlash: return "Gemini 3.8 Flash"
+		case .claudeSonnet: return "Claude Sonnet 4.6"
+		case .claudeOpus: return "Claude Opus 4.6"
 		}
 	}
 
 	var subtitle: String {
 		switch self {
-		case .opus: return "Recommended: frontier capability at voice speed"
-		case .fable: return "Most capable, slower replies"
+		case .auto: return "Recommended: follows your Antigravity configuration"
+		case .geminiHydrogen: return "Frontier Gemini reasoning at voice speed"
+		case .geminiFlash: return "Faster replies for quick tasks"
+		case .claudeSonnet: return "Balanced Sonnet via Antigravity"
+		case .claudeOpus: return "Most capable reasoning via Antigravity"
 		}
 	}
 }
 
-/// How hard Claude thinks before answering. Higher is more thorough and slower.
-/// How hard Claude thinks. Bol never goes below medium: a voice request is a real task, and lighter thinking
-/// gets it wrong. A `low` saved by an older version reads as medium.
-enum ClaudeEffort: String, Codable, CaseIterable {
+/// How hard Antigravity thinks before answering. Bol never goes below medium: a voice request is a real task,
+/// and lighter thinking gets it wrong. A `low` saved by an older version reads as medium.
+enum AgentEffort: String, Codable, CaseIterable {
 	case medium, high, xhigh, max
 
 	init(from decoder: Decoder) throws {
-		self = ClaudeEffort(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .medium
+		self = AgentEffort(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .medium
 	}
 
 	var title: String {
@@ -158,6 +165,9 @@ extension Config {
 		if config.apiKeys[.openai] == nil {
 			config.apiKeys[.openai] = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]
 		}
+		if config.apiKeys[.gemini] == nil {
+			config.apiKeys[.gemini] = ProcessInfo.processInfo.environment["GEMINI_API_KEY"]
+		}
 		if config.apiKeys[.noiz] == nil {
 			let legacyNoizKeyFile = Constants.bolDirectory.appendingPathComponent("noiz_key")
 			config.apiKeys[.noiz] = try? String(contentsOf: legacyNoizKeyFile, encoding: .utf8)
@@ -186,7 +196,9 @@ extension Config {
 		guard let stored = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
 			throw CocoaError(.fileReadCorruptFile)
 		}
-		return try decode(stored: ConfigMigration.pasteLastToggle(stored: ConfigMigration.migrated(stored: stored)))
+		return try decode(
+			stored: ConfigMigration.antigravityKeys(
+				stored: ConfigMigration.pasteLastToggle(stored: ConfigMigration.migrated(stored: stored))))
 	}
 
 	/// Lays `stored` over the defaults, then decodes.

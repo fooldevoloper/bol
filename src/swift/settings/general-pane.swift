@@ -29,7 +29,8 @@ struct GeneralPane: View {
 				fileRow(label: "Log", icon: "doc.plaintext", url: Constants.logFile)
 			}
 			SettingsGroup(
-				title: "Setup", footer: "Checks Claude Code, your Claude login, the microphone and the voice again."
+				title: "Setup",
+				footer: "Checks Antigravity CLI, your Google account sign-in, the microphone and the voice again."
 			) {
 				SettingsRow("First-run setup", icon: "checklist", help: "Signed out, or changed Macs? Run it again.") {
 					Button("Run Setup Again") { model.onRunSetup?() }.buttonStyle(SubtleButtonStyle())

@@ -89,7 +89,7 @@ struct OnboardingView: View {
 		case .permissions: return model.isStepComplete ? "Continue" : "Skip for Now"
 		case .autonomy: return model.isComputerUseOn && model.isChromeControlOn ? "Continue" : "Skip for Now"
 		case .terms: return "Agree and Start Using Bol"
-		case .claudeCode, .account, .microphone, .voice, .dictation, .ready: return "Continue"
+		case .antigravityCLI, .account, .microphone, .voice, .dictation, .ready: return "Continue"
 		}
 	}
 
@@ -97,7 +97,8 @@ struct OnboardingView: View {
 	private var skipTitle: String? {
 		switch model.step {
 		case .microphone where model.microphone == .authorized && !model.isStepComplete: return "Skip test"
-		case .welcome, .claudeCode, .account, .microphone, .voice, .dictation, .permissions, .autonomy, .ready, .terms:
+		case .welcome, .antigravityCLI, .account, .microphone, .voice, .dictation, .permissions, .autonomy, .ready,
+			.terms:
 			return nil
 		}
 	}
@@ -105,8 +106,8 @@ struct OnboardingView: View {
 	private var title: String {
 		switch model.step {
 		case .welcome: return "Set up Bol"
-		case .claudeCode: return "Claude Code"
-		case .account: return "Your Claude account"
+		case .antigravityCLI: return "Antigravity CLI"
+		case .account: return "Your Google account"
 		case .microphone: return "Microphone and speech"
 		case .voice: return "Bol's voice"
 		case .dictation: return "Dictate into any app"
@@ -121,13 +122,13 @@ struct OnboardingView: View {
 		switch model.step {
 		case .welcome:
 			return
-				"Bol is a voice assistant for your Mac that thinks and acts with Claude Code. Setup checks everything it needs, which takes about two minutes."
-		case .claudeCode:
+				"Bol is a voice assistant for your Mac that thinks and acts with Antigravity. Setup checks everything it needs, which takes about two minutes."
+		case .antigravityCLI:
 			return
-				"Bol runs on the Claude Code installed on this Mac: every request becomes a Claude Code session with full access to your apps and files."
+				"Bol runs on the Antigravity CLI (`agy`) installed on this Mac: every request becomes an Antigravity session with full access to your apps and files."
 		case .account:
 			return
-				"Bol listens with Claude's speech-to-text and thinks with your Claude plan. Both need a Claude subscription (Pro or Max); an API key alone can't do speech-to-text."
+				"Bol uses your active Google / Antigravity sign-in (or Gemini API credentials) to think and act on your Mac."
 		case .microphone:
 			return
 				"Bol opens the microphone only while it listens to you, then releases it for other apps. Say a sentence to check that Bol can hear and transcribe you."
@@ -142,7 +143,7 @@ struct OnboardingView: View {
 				"Bol does things for you by controlling apps and, when a request needs it, looking at your screen. You can grant these later in Settings."
 		case .autonomy:
 			return
-				"Recommended. With these, Bol finishes more requests by itself instead of stopping to ask you: it can work any app on screen and browse in your own Chrome, signed in as you."
+				"Recommended. With these, Bol finishes more requests by itself instead of stopping to ask you: it can work any app on screen and browse in Chrome when tools are enabled."
 		case .ready:
 			return
 				"Press \(ShortcutState.shared.talkText) anywhere and start talking. Pause as much as you like; press Enter to send."
@@ -155,7 +156,7 @@ struct OnboardingView: View {
 	@ViewBuilder private var content: some View {
 		switch model.step {
 		case .welcome: WelcomeStep()
-		case .claudeCode: ClaudeCodeStep(model: model)
+		case .antigravityCLI: AntigravityCLIStep(model: model)
 		case .account: AccountStep(model: model)
 		case .microphone: MicrophoneStep(model: model)
 		case .voice: VoiceStep(settings: settings)
@@ -251,8 +252,8 @@ private struct CommandBlock: View {
 
 private struct WelcomeStep: View {
 	private let checks: [(icon: String, title: String, detail: String)] = [
-		("terminal", "Claude Code", "Installed on this Mac"),
-		("person.crop.circle", "Claude subscription", "Signed in and working"),
+		("terminal", "Antigravity CLI", "Installed on this Mac"),
+		("person.crop.circle", "Google account", "Signed in to Antigravity"),
 		("mic", "Microphone and speech", "Bol can hear and transcribe you"),
 		("speaker.wave.2", "Voice", "How Bol talks back"),
 		("lock.shield", "Permissions", "So Bol can control apps and see your screen"),
@@ -269,34 +270,34 @@ private struct WelcomeStep: View {
 	}
 }
 
-private struct ClaudeCodeStep: View {
+private struct AntigravityCLIStep: View {
 	@ObservedObject var model: OnboardingModel
 
 	var body: some View {
 		SettingsGroup {
-			switch model.claudeCode {
+			switch model.antigravityCLI {
 			case .checking:
-				CheckStatus(kind: .working, text: "Looking for Claude Code…")
+				CheckStatus(kind: .working, text: "Looking for Antigravity CLI…")
 			case .installing:
 				CheckStatus(
 					kind: .working,
-					text: "Finish the installer in Terminal. Bol continues as soon as Claude Code is installed.")
+					text: "Finish the installer in Terminal. Bol continues as soon as `agy` is installed.")
 			case .missing:
-				CheckStatus(kind: .warning, text: "Claude Code isn't installed on this Mac.")
+				CheckStatus(kind: .warning, text: "Antigravity CLI isn't installed on this Mac.")
 				VStack(alignment: .leading, spacing: 10) {
 					Text("Bol can run the official installer for you in Terminal:").font(UI.caption).foregroundStyle(
 						.secondary)
-					CommandBlock(command: ClaudeCode.installCommand)
+					CommandBlock(command: AntigravityCLI.installCommand)
 					HStack(spacing: 8) {
-						Button("Install in Terminal") { model.installClaudeCode() }
+						Button("Install in Terminal") { model.installAntigravityCLI() }
 							.buttonStyle(SubtleButtonStyle(isProminent: true))
-						Button("Check Again") { model.checkClaudeCode() }.buttonStyle(SubtleButtonStyle())
+						Button("Check Again") { model.checkAntigravityCLI() }.buttonStyle(SubtleButtonStyle())
 					}
 				}
 				.padding(14)
 			case .installed(let version):
-				CheckStatus(kind: .success, text: "Claude Code \(version) is installed.")
-				if let path = ClaudeCode.executable?.path {
+				CheckStatus(kind: .success, text: "Antigravity CLI \(version) is installed.")
+				if let path = AntigravityCLI.executable?.path {
 					SettingsRow("Location", icon: "folder") {
 						Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
 							.font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
@@ -304,7 +305,7 @@ private struct ClaudeCodeStep: View {
 				}
 			}
 		}
-		.onAppear { if model.claudeCode == .checking { model.checkClaudeCode() } }
+		.onAppear { if model.antigravityCLI == .checking { model.checkAntigravityCLI() } }
 	}
 }
 
@@ -315,7 +316,7 @@ private struct AccountStep: View {
 		SettingsGroup {
 			switch model.account {
 			case .checking:
-				CheckStatus(kind: .working, text: "Checking your Claude login…")
+				CheckStatus(kind: .working, text: "Checking your Antigravity sign-in…")
 			case .signingIn:
 				CheckStatus(kind: .working, text: "Finish signing in in your browser. Bol continues automatically.")
 				HStack(spacing: 8) {
@@ -325,14 +326,14 @@ private struct AccountStep: View {
 				.padding(14)
 				.frame(maxWidth: .infinity, alignment: .leading)
 			case .signedOut:
-				CheckStatus(kind: .warning, text: "Claude Code isn't signed in to a Claude account.")
-				actions(primary: "Sign In with Claude")
+				CheckStatus(kind: .warning, text: "Antigravity CLI isn't signed in to a Google account.")
+				actions(primary: "Sign In with Google")
 			case .notWorking(let reason):
 				CheckStatus(kind: .failure, text: reason)
 				actions(primary: "Sign In Again")
-			case .ready(let plan):
+			case .ready(let detail):
 				CheckStatus(
-					kind: .success, text: "Signed in\(plan.map { " with \($0)" } ?? ""). Your subscription is working.")
+					kind: .success, text: "Signed in\(detail.map { " (\($0))" } ?? ""). Ready to run Antigravity.")
 			}
 		}
 		.onAppear { if model.account == .checking { model.checkAccount() } }
@@ -396,7 +397,7 @@ private struct MicrophoneStep: View {
 	private var prompt: String {
 		switch model.speechTest {
 		case .idle: return "Say “\(OnboardingModel.testPhrase)”"
-		case .connecting: return "Connecting to Claude speech-to-text…"
+		case .connecting: return "Starting speech recognition…"
 		case .listening(let heard): return heard.isEmpty ? "Listening… speak now" : "“\(heard)”"
 		case .passed(let heard): return "“\(heard)”"
 		case .failed: return "The test didn't work"
@@ -407,7 +408,7 @@ private struct MicrophoneStep: View {
 		switch model.speechTest {
 		case .idle: return "Click Start Test, then say the phrase. It passes as soon as Bol recognizes it."
 		case .connecting, .listening: return "The microphone is on."
-		case .passed: return "Bol heard you. Microphone, login and speech-to-text all work."
+		case .passed: return "Bol heard you. Microphone and speech-to-text work."
 		case .failed(let reason): return reason
 		}
 	}
@@ -666,11 +667,9 @@ private struct AutonomyStep: View {
 			}
 			SettingsRow(
 				"Chrome control", icon: "globe",
-				help: model.hasChromeExtension
-					? "Bol browses in your Chrome with the Claude in Chrome extension"
-					: "Install the Claude in Chrome extension, then come back"
+				help: "Let Antigravity use browser & Chrome DevTools MCP tools when available"
 			) {
-				status(isOn: model.isChromeControlOn, title: model.hasChromeExtension ? "Turn On" : "Get Extension…") {
+				status(isOn: model.isChromeControlOn, title: "Turn On") {
 					model.turnOnChromeControl()
 				}
 			}
@@ -717,7 +716,7 @@ private struct TermsStep: View {
 				point(
 					"Your accounts, their terms", icon: "link",
 					text:
-						"Bol uses your Claude subscription (including endpoints Anthropic doesn't publish) and any keys you add. Following those services' terms is up to you."
+						"Bol uses your Antigravity sign-in and any API keys you add (such as Google Gemini, OpenAI, or Noiz AI). Following those services' terms is up to you."
 				)
 				point(
 					"No warranty", icon: "shield",
@@ -783,8 +782,8 @@ private struct ReadyStep: View {
 				}
 			}
 			SettingsGroup(title: "Summary") {
-				SettingsRow("Claude Code", icon: "terminal") {
-					summary(text: claudeCodeText, isOK: model.isComplete(step: .claudeCode))
+				SettingsRow("Antigravity CLI", icon: "terminal") {
+					summary(text: antigravityCLIText, isOK: model.isComplete(step: .antigravityCLI))
 				}
 				SettingsRow("Account", icon: "person.crop.circle") {
 					summary(text: accountText, isOK: model.isComplete(step: .account))
@@ -821,13 +820,13 @@ private struct ReadyStep: View {
 		}
 	}
 
-	private var claudeCodeText: String {
-		if case .installed(let version) = model.claudeCode { return "Version \(version)" }
+	private var antigravityCLIText: String {
+		if case .installed(let version) = model.antigravityCLI { return "Version \(version)" }
 		return "Not found"
 	}
 
 	private var accountText: String {
-		if case .ready(let plan) = model.account { return plan ?? "Signed in" }
+		if case .ready(let detail) = model.account { return detail ?? "Signed in" }
 		return "Not verified"
 	}
 

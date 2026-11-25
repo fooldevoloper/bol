@@ -21,12 +21,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	private var readiness = Readiness.checking
 
 	private enum Readiness {
-		/// Checking Claude Code at launch.
+		/// Checking Antigravity CLI at launch.
 		case checking
 		/// First-run setup isn't finished.
 		case setupUnfinished
-		/// Setup was done once, but Claude Code is now missing or signed out.
-		case claudeCodeNotReady
+		/// Setup was done once, but Antigravity CLI is now missing or signed out.
+		case engineNotReady
 		case started
 	}
 	private var isMenuOpen = false
@@ -154,32 +154,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		}
 	}
 
-	/// Claude Code missing or signed out blocks the assistant: setup reopens at the failing step.
+	/// Antigravity CLI missing or signed out blocks the assistant: setup reopens at the failing step.
 	private func startAssistantIfReady() {
 		Task { @MainActor [weak self] in
 			let status = await EngineStatus.check()
 			if status.isReady {
 				self?.startAssistant()
 			} else {
-				Log.info(message: "launch: Claude Code not ready (installed: \(status.isInstalled)), reopening setup")
-				self?.readiness = .claudeCodeNotReady
-				self?.showOnboarding(step: status.isInstalled ? .account : .claudeCode)
-				await self?.startWhenClaudeCodeReady()
+				Log.info(
+					message: "launch: Antigravity CLI not ready (installed: \(status.isInstalled)), reopening setup")
+				self?.readiness = .engineNotReady
+				self?.showOnboarding(step: status.isInstalled ? .account : .antigravityCLI)
+				await self?.startWhenEngineReady()
 			}
 		}
 	}
 
-	/// Fixed from Settings or Terminal instead of setup: start as soon as Claude Code is ready. Each check
-	/// launches `claude` and `security`, so it checks every 3 s for two minutes (while the user is likely
-	/// fixing it), then every 30 s.
-	@MainActor private func startWhenClaudeCodeReady() async {
+	/// Fixed from Settings or Terminal instead of setup: start as soon as Antigravity is ready. Checks
+	/// every 3 s for two minutes (while the user is likely fixing it), then every 30 s.
+	@MainActor private func startWhenEngineReady() async {
 		let startedAt = Date()
-		while readiness == .claudeCodeNotReady {
+		while readiness == .engineNotReady {
 			let seconds: UInt64 = -startedAt.timeIntervalSinceNow < 120 ? 3 : 30
 			try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
-			guard readiness == .claudeCodeNotReady else { return }  // setup finished meanwhile
+			guard readiness == .engineNotReady else { return }  // setup finished meanwhile
 			if await EngineStatus.check().isReady {
-				Log.info(message: "launch: Claude Code ready, starting")
+				Log.info(message: "launch: Antigravity ready, starting")
 				session?.onboarding.close()
 				startAssistant()
 			}
@@ -189,7 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	private func showOnboarding(step: OnboardingStep) {
 		guard let session else { return }
 		session.onboarding.model.step = step
-		if step == .account { session.onboarding.model.checkClaudeCode() }  // mark the step before it done
+		if step == .account { session.onboarding.model.checkAntigravityCLI() }  // mark the step before it done
 		session.onboarding.show()
 	}
 
@@ -288,11 +288,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		switch controller.state {
 		case .starting:
 			switch readiness {
-			case .checking, .started: (title, detail, color) = ("Starting…", "Connecting to Claude Code", .secondary)
+			case .checking, .started: (title, detail, color) = ("Starting…", "Connecting to Antigravity", .secondary)
 			case .setupUnfinished:
 				(title, detail, color) = ("Setup not finished", "Finish setup to start talking to Bol", .orange)
-			case .claudeCodeNotReady:
-				(title, detail, color) = ("Claude Code isn't ready", "Sign in again to start talking to Bol", .orange)
+			case .engineNotReady:
+				(title, detail, color) = ("Antigravity isn't ready", "Sign in again to start talking to Bol", .orange)
 			}
 		case .idle where controller.isWorkingInBackground || !controller.tasks.isEmpty:
 			let count = controller.tasks.count
@@ -316,7 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		case .speaking: (title, detail, color) = ("Speaking…", "Press Esc to stop", .teal)
 		}
 		switch readiness {
-		case .setupUnfinished, .claudeCodeNotReady:
+		case .setupUnfinished, .engineNotReady:
 			menu.addItem(item(title: "Finish Setting Up Bol…", action: #selector(openOnboarding), symbol: "checklist"))
 			menu.addItem(.separator())
 		case .checking, .started:
@@ -442,10 +442,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		let model = NSMenuItem(title: "Model", action: nil, keyEquivalent: "")
 		model.image = symbolImage(name: "sparkle")
 		let modelMenu = NSMenu()
-		for option in ClaudeModel.allCases {
+		for option in AgentModel.allCases {
 			let entry = item(title: option.title, action: #selector(pickModel(_:)))
 			entry.representedObject = option.rawValue
-			entry.state = config.claudeModel == option ? .on : .off
+			entry.state = config.agentModel == option ? .on : .off
 			modelMenu.addItem(entry)
 		}
 		model.submenu = modelMenu
@@ -520,8 +520,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	}
 
 	@objc private func pickModel(_ sender: NSMenuItem) {
-		guard let id = sender.representedObject as? String, let model = ClaudeModel(rawValue: id) else { return }
-		session?.settings.model.config.claudeModel = model
+		guard let id = sender.representedObject as? String, let model = AgentModel(rawValue: id) else { return }
+		session?.settings.model.config.agentModel = model
 	}
 
 	@objc private func openSettings() { session?.settings.show() }

@@ -1,7 +1,7 @@
 import Foundation
 
-/// Runs the bundled brain (Claude Agent SDK) and exchanges JSON lines with it.
-/// The protocol mirrors brain/src/protocol.ts.
+/// Runs the bundled brain (Antigravity ACP) and exchanges JSON lines with it.
+/// The protocol mirrors src/typescript/protocol.ts.
 final class BrainBridge {
 	/// `job` is set when the event comes from a background job rather than the conversation.
 	enum Event {
@@ -45,29 +45,27 @@ final class BrainBridge {
 	/// The settings the brain reads at startup; changing any of them restarts it.
 	private struct LaunchSettings: Equatable {
 		let workingDirectory: String
-		let claudeModel: ClaudeModel
-		let claudeEffort: ClaudeEffort
+		let agentModel: AgentModel
+		let agentEffort: AgentEffort
 		let isChromeEnabled: Bool
 		let screenAccess: ScreenAccess
 
 		init(config: Config) {
 			workingDirectory = config.workingDirectory ?? Constants.workspaceDirectory.path
-			claudeModel = config.claudeModel
-			claudeEffort = config.claudeEffort
+			agentModel = config.agentModel
+			agentEffort = config.agentEffort
 			isChromeEnabled = config.isChromeEnabled
 			screenAccess = config.screenAccess
 		}
 
-		func environment(claude: URL) -> [String: String] {
+		func environment(agy: URL) -> [String: String] {
 			var env = Shell.environment
-			env["BOL_CLAUDE_PATH"] = claude.path
+			env["BOL_AGY_PATH"] = agy.path
 			env["BOL_CWD"] = workingDirectory
-			env["BOL_MODEL"] = claudeModel.rawValue
-			env["BOL_EFFORT"] = claudeEffort.rawValue
+			env["BOL_MODEL"] = agentModel.rawValue
+			env["BOL_EFFORT"] = agentEffort.rawValue
 			env["BOL_CHROME"] = isChromeEnabled ? "1" : "0"
 			env["BOL_SCREEN"] = screenAccess.rawValue
-			// The SDK must use the subscription login, not a stray API key.
-			env.removeValue(forKey: "ANTHROPIC_API_KEY")
 			return env
 		}
 	}
@@ -94,18 +92,18 @@ final class BrainBridge {
 					isDelegated: false))
 			return
 		}
-		guard let claude = ClaudeCode.executable else {
-			Log.info(message: "brain: Claude Code not installed")
+		guard let agy = AntigravityCLI.executable else {
+			Log.info(message: "brain: Antigravity CLI not installed")
 			onEvent?(
 				.result(
-					text: "Claude Code isn't installed. Open Bol's setup to install it.", isError: true, job: nil,
+					text: "Antigravity CLI isn't installed. Open Bol's setup to install it.", isError: true, job: nil,
 					isDelegated: false))
 			return
 		}
 		let process = Process()
 		process.executableURL = executable
 		process.currentDirectoryURL = executable.deletingLastPathComponent()
-		process.environment = settings.environment(claude: claude)
+		process.environment = settings.environment(agy: agy)
 
 		let inPipe = Pipe()
 		let outPipe = Pipe()

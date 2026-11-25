@@ -3,8 +3,8 @@ import SwiftUI
 
 // MARK: - MCP servers (Settings → Assistant)
 
-/// The user's own MCP servers: live status, on/off, add, paste a config, remove. Servers set up in
-/// Claude Code (`claude mcp add`, claude.ai connectors) are listed too, read-only.
+/// The user's own MCP servers: live status, on/off, add, paste a config, remove. Servers configured
+/// globally in Antigravity (`~/.gemini/.../mcp_config.json`) are listed too, read-only.
 struct MCPServersSection: View {
 	@ObservedObject var model: SettingsModel
 	@State private var sheet: Sheet?
@@ -15,7 +15,7 @@ struct MCPServersSection: View {
 		var id: String { rawValue }
 	}
 
-	/// Servers the brain reports that aren't in mcp.json: Claude Code's own and claude.ai connectors.
+	/// Servers the brain reports that aren't in mcp.json: Antigravity's own servers.
 	private var otherServers: [MCPStatusReport.Server] {
 		let mine = Set(model.mcpEntries.map(\.name))
 		return (model.mcpReport?.servers ?? []).filter { !mine.contains($0.name) && $0.source != "dynamic" }
@@ -25,7 +25,7 @@ struct MCPServersSection: View {
 		SettingsGroup(
 			title: "MCP servers",
 			footer:
-				"Extra tools for Bol, kept in ~/.bol/mcp.json in the same format as Claude Code, Claude Desktop and Cursor. Changes apply right away, even mid-conversation.",
+				"Extra tools for Bol, kept in ~/.bol/mcp.json in the standard MCP format (HTTP or stdio). Changes apply right away, even mid-conversation.",
 			trailing: AnyView(IconButton(symbol: "arrow.clockwise", help: "Check again") { model.refreshMCP() })
 		) {
 			ForEach(model.mcpEntries) { entry in
@@ -59,7 +59,7 @@ struct MCPServersSection: View {
 				) { signInButton(name: server.name, status: server) }
 			}
 			if model.mcpEntries.isEmpty, otherServers.isEmpty {
-				Text("No servers yet. Add one, or paste a config from Claude Desktop, Cursor or a server's README.")
+				Text("No servers yet. Add one, or paste a config from Cursor, Antigravity or a server's README.")
 					.font(UI.caption).foregroundStyle(.secondary)
 					.padding(.horizontal, 14).padding(.vertical, 12)
 			}
@@ -134,12 +134,11 @@ struct MCPServersSection: View {
 
 	static func describe(source: String?) -> String {
 		switch source {
-		case "user": return "From Claude Code (claude mcp add)"
-		case "project", "local": return "From Claude Code, this project"
-		case "claudeai": return "claude.ai connector"
-		case "plugin": return "From a Claude Code plugin"
+		case "user": return "From Antigravity (~/.gemini config)"
+		case "project", "local": return "From workspace MCP config"
+		case "plugin": return "From an Antigravity plugin"
 		case "managed", "enterprise": return "Managed by your organization"
-		default: return "From Claude Code"
+		default: return "From Antigravity"
 		}
 	}
 }
@@ -338,7 +337,7 @@ private struct PasteServersSheet: View {
 		VStack(alignment: .leading, spacing: 14) {
 			Text("Paste MCP config").font(.system(size: 16, weight: .semibold))
 			Text(
-				"Paste from Claude Desktop, Cursor, Claude Code's .mcp.json or a server's README: a whole {\"mcpServers\": {…}} block, several servers, or a single one."
+				"Paste from Cursor, Antigravity or a server's README: a whole {\"mcpServers\": {…}} block, several servers, or a single one."
 			)
 			.font(UI.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 			PairsEditor(

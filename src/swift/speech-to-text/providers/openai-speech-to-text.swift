@@ -81,7 +81,7 @@ final class OpenAISpeechToTextSession: SpeechToTextSession {
 		self.settings = settings
 	}
 
-	func start(claudeToken: String?) {}
+	func start() {}
 
 	func send(pcm data: Data) {
 		lock.lock()

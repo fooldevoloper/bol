@@ -3,15 +3,15 @@ import SwiftUI
 
 /// First-run setup: verifies everything Bol needs before it starts listening.
 enum OnboardingStep: Int, CaseIterable, Identifiable {
-	case welcome, claudeCode, account, microphone, voice, dictation, permissions, autonomy, ready, terms
+	case welcome, antigravityCLI, account, microphone, voice, dictation, permissions, autonomy, ready, terms
 
 	var id: Int { rawValue }
 
 	var title: String {
 		switch self {
 		case .welcome: return "Welcome"
-		case .claudeCode: return "Claude Code"
-		case .account: return "Claude account"
+		case .antigravityCLI: return "Antigravity CLI"
+		case .account: return "Google account"
 		case .microphone: return "Microphone"
 		case .voice: return "Voice"
 		case .dictation: return "Dictation"
@@ -25,7 +25,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
 	var icon: String {
 		switch self {
 		case .welcome: return "hand.wave"
-		case .claudeCode: return "terminal"
+		case .antigravityCLI: return "terminal"
 		case .account: return "person.crop.circle"
 		case .microphone: return "mic"
 		case .voice: return "speaker.wave.2"
@@ -38,7 +38,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
 	}
 }
 
-enum ClaudeCodeCheck: Equatable {
+enum AntigravityCLICheck: Equatable {
 	case checking
 	case missing
 	/// The installer is running in Terminal; Bol watches for the binary.
@@ -51,9 +51,8 @@ enum AccountCheck: Equatable {
 	case signedOut
 	/// Sign-in is running in Terminal; Bol watches for the login.
 	case signingIn
-	/// Signed in, but the subscription didn't answer (expired login, or no Pro/Max plan).
 	case notWorking(reason: String)
-	case ready(plan: String?)
+	case ready(detail: String?)
 }
 
 enum SpeechTest: Equatable {
@@ -68,7 +67,7 @@ final class OnboardingModel: ObservableObject {
 	@Published var step = OnboardingStep.welcome {
 		didSet { stepChanged(from: oldValue) }
 	}
-	@Published private(set) var claudeCode = ClaudeCodeCheck.checking
+	@Published private(set) var antigravityCLI = AntigravityCLICheck.checking
 	@Published private(set) var account = AccountCheck.checking
 	@Published private(set) var microphone = AVCaptureDevice.authorizationStatus(for: .audio)
 	@Published private(set) var speechTest = SpeechTest.idle
@@ -87,7 +86,7 @@ final class OnboardingModel: ObservableObject {
 
 	/// A background watcher for the current step (install, sign-in, permissions); one at a time.
 	private var watcher: Task<Void, Never>?
-	private var speechSession: ClaudeSpeechToTextSession?
+	private var speechSession: SpeechToTextSession?
 	/// Made on the first speech test, so an app that never runs setup holds no audio engine.
 	private lazy var capture = AudioCapture()
 	private var levelTimer: Timer?
@@ -105,8 +104,8 @@ final class OnboardingModel: ObservableObject {
 		// Recommended, never required.
 		case .welcome, .dictation, .autonomy, .ready: return true
 		case .terms: return isAgreeingToTerms || settings.config.hasAcceptedCurrentTerms
-		case .claudeCode:
-			if case .installed = claudeCode { return true }
+		case .antigravityCLI:
+			if case .installed = antigravityCLI { return true }
 			return false
 		case .account:
 			if case .ready = account { return true }
@@ -117,7 +116,7 @@ final class OnboardingModel: ObservableObject {
 		case .voice:
 			let provider = TextToSpeechProviders.provider(id: settings.config.textToSpeech.provider)
 			switch provider.credential {
-			case .none, .claudeSubscription: return true
+			case .none: return true
 			case .apiKey(let id): return settings.keyValidation(id: id) == .valid
 			}
 		case .permissions:
@@ -171,7 +170,7 @@ final class OnboardingModel: ObservableObject {
 		case .permissions: watchPermissions()
 		case .autonomy: watchAutonomy()
 		case .account where account == .signingIn: checkAccount()
-		case .welcome, .claudeCode, .account, .microphone, .voice, .dictation, .ready, .terms: break
+		case .welcome, .antigravityCLI, .account, .microphone, .voice, .dictation, .ready, .terms: break
 		}
 	}
 
@@ -181,7 +180,7 @@ final class OnboardingModel: ObservableObject {
 		if previous == .microphone { stopSpeechTest() }
 		switch step {
 		case .welcome, .voice, .ready, .terms: break
-		case .claudeCode: checkClaudeCode()
+		case .antigravityCLI: checkAntigravityCLI()
 		case .account: checkAccount()
 		case .microphone: microphone = AVCaptureDevice.authorizationStatus(for: .audio)
 		case .dictation: checkDictationApps()
@@ -206,65 +205,49 @@ final class OnboardingModel: ObservableObject {
 	/// Whether Bol recommends its own dictation on this Mac.
 	var isDictationRecommended: Bool { otherDictationApps.isEmpty }
 
-	// MARK: Claude Code
+	// MARK: Antigravity CLI
 
-	func checkClaudeCode() {
-		claudeCode = .checking
+	func checkAntigravityCLI() {
+		antigravityCLI = .checking
 		Task { @MainActor in
-			claudeCode = await ClaudeCode.version().map { .installed(version: $0) } ?? .missing
+			antigravityCLI = await AntigravityCLI.version().map { .installed(version: $0) } ?? .missing
 		}
 	}
 
-	func installClaudeCode() {
-		Terminal.run(command: ClaudeCode.installCommand)
-		claudeCode = .installing
+	func installAntigravityCLI() {
+		Terminal.run(command: AntigravityCLI.installCommand)
+		antigravityCLI = .installing
 		watch { [weak self] in
-			guard let version = await ClaudeCode.version() else { return false }
-			self?.claudeCode = .installed(version: version)
+			guard let version = await AntigravityCLI.version() else { return false }
+			self?.antigravityCLI = .installed(version: version)
 			return true
 		}
 	}
 
 	// MARK: Account
 
-	/// Signed in is not enough: the subscription must answer, since speech-to-text runs on it.
 	func checkAccount() {
 		account = .checking
 		Task { @MainActor in account = await Self.verifyAccount() }
 	}
 
 	func signIn() {
-		guard ClaudeCode.executable != nil else {
-			step = .claudeCode
+		guard AntigravityCLI.executable != nil else {
+			step = .antigravityCLI
 			return
 		}
-		Terminal.run(command: "\(ClaudeCode.shellPath) auth login")
+		Terminal.run(command: AntigravityAuth.loginCommand)
 		account = .signingIn
 		watch { [weak self] in
-			guard await ClaudeAuth.account() != nil else { return false }
+			guard await AntigravityAuth.account() != nil else { return false }
 			self?.account = await Self.verifyAccount()
 			return true
 		}
 	}
 
 	private static func verifyAccount() async -> AccountCheck {
-		guard let account = await ClaudeAuth.account() else { return .signedOut }
-		do {
-			_ = try await PlanUsage.fetch()
-			return .ready(plan: account.plan)
-		} catch let problem as ServiceProblem {
-			switch problem.fix {
-			case .signInToClaude, .checkConnection:
-				return .notWorking(reason: "\(problem.title). \(problem.detail)")
-			case .useOpenAIForListening, .installClaudeCode, .tryAgain, .none:
-				// The usage endpoint isn't a public API: if it changed or is down, the login can still be fine.
-				// The speech test in the next step proves the subscription works.
-				Log.info(message: "onboarding: usage check skipped: \(problem.title)")
-				return .ready(plan: account.plan)
-			}
-		} catch {
-			return .notWorking(reason: "Couldn't reach Claude: \(error.localizedDescription)")
-		}
+		guard let account = await AntigravityAuth.account() else { return .signedOut }
+		return .ready(detail: account.detail)
 	}
 
 	// MARK: Microphone + speech-to-text
@@ -287,18 +270,14 @@ final class OnboardingModel: ObservableObject {
 		}
 	}
 
-	/// Opens the mic and Claude's speech-to-text: proves the mic, the login and the subscription
-	/// work together. Passes once a sentence comes back.
+	/// Opens the mic and the active speech-to-text provider. Passes once the test sentence comes back.
 	func startSpeechTest() {
 		stopSpeechTest()
 		speechTest = .connecting
 		Task { @MainActor in
-			guard let token = await ClaudeAuth.accessToken(isUserAction: true) else {
-				speechTest = .failed(reason: "Not signed in to Claude.")
-				return
-			}
-			guard speechTest == .connecting else { return }  // cancelled meanwhile
-			let session = ClaudeSpeechToTextSession()
+			guard speechTest == .connecting else { return }
+			let provider = SpeechToTextProviders.active(config: settings.config)
+			let session = provider.makeSession(config: settings.config)
 			var finals: [String] = []
 			session.onTranscript = { [weak self, weak session] transcript in
 				guard let self, let session, session === self.speechSession else { return }
@@ -325,11 +304,22 @@ final class OnboardingModel: ObservableObject {
 				return
 			}
 			speechSession = session
-			session.start(claudeToken: token)
+			session.start()
 			speechTest = .listening(heard: "")
 			levelTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-				guard let self else { return }
-				self.inputLevel = self.capture.level
+				Task { @MainActor in
+					guard let self else { return }
+					self.inputLevel = self.capture.level
+				}
+			}
+			if !session.isStreamingInterim {
+				// Batch providers (Gemini / OpenAI) flush automatically after capturing the short test sentence.
+				try? await Task.sleep(nanoseconds: 4_500_000_000)
+				if session === speechSession {
+					capture.stop()
+					capture.onPCM16k = nil
+					session.flush()
+				}
 			}
 			// Nothing heard in 15 seconds: stop, so the mic isn't held.
 			try? await Task.sleep(nanoseconds: 15_000_000_000)
@@ -387,15 +377,12 @@ final class OnboardingModel: ObservableObject {
 
 	// MARK: Autonomy
 
-	/// Whether the Claude in Chrome extension is in a Chrome profile (checked while the step is open).
-	@Published private(set) var hasChromeExtension = ChromeExtension.isInstalled
-
 	var isComputerUseOn: Bool {
 		settings.config.screenAccess != .off && settings.permissions.isGranted(permission: .accessibility)
 			&& settings.permissions.isGranted(permission: .screenRecording)
 	}
 
-	var isChromeControlOn: Bool { settings.config.isChromeEnabled && hasChromeExtension }
+	var isChromeControlOn: Bool { settings.config.isChromeEnabled }
 
 	/// Lets Bol see and operate the screen: screen access on, then whichever grant is missing.
 	func turnOnComputerUse() {
@@ -408,17 +395,13 @@ final class OnboardingModel: ObservableObject {
 
 	func turnOnChromeControl() {
 		settings.config.isChromeEnabled = true
-		if !hasChromeExtension { ChromeExtension.openStorePage() }
 	}
 
 	private func watchAutonomy() {
 		settings.refreshPermissions()
-		hasChromeExtension = ChromeExtension.isInstalled
 		watch { [weak self] in
 			guard let self else { return true }
 			self.settings.refreshPermissions()
-			let isInstalled = ChromeExtension.isInstalled
-			if isInstalled != self.hasChromeExtension { self.hasChromeExtension = isInstalled }
 			return false  // keep watching while the step is open
 		}
 	}
@@ -427,10 +410,10 @@ final class OnboardingModel: ObservableObject {
 
 	/// Dev-only (`Bol --render-onboarding`): shows a step with given check results, no real checks.
 	func setPreviewState(
-		step: OnboardingStep, claudeCode: ClaudeCodeCheck, account: AccountCheck, microphone: AVAuthorizationStatus,
-		speechTest: SpeechTest, dictationApps: [DictationApp]? = nil
+		step: OnboardingStep, antigravityCLI: AntigravityCLICheck, account: AccountCheck,
+		microphone: AVAuthorizationStatus, speechTest: SpeechTest, dictationApps: [DictationApp]? = nil
 	) {
-		self.claudeCode = claudeCode
+		self.antigravityCLI = antigravityCLI
 		self.account = account
 		self.microphone = microphone
 		self.speechTest = speechTest

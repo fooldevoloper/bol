@@ -71,10 +71,6 @@ final class SettingsModel: ObservableObject {
 	@Published private(set) var prompts: Prompts?
 	@Published private(set) var engine: EngineStatus?
 	@Published private(set) var isCheckingEngine = false
-	@Published private(set) var usage: [PlanLimit] = []
-	@Published private(set) var usageError: String?
-	@Published private(set) var isLoadingUsage = false
-	@Published private(set) var usageUpdatedAt: Date?
 	@Published private(set) var permissions = PermissionStatus.current()
 	/// The servers in ~/.bol/mcp.json, and how the brain last said they're doing.
 	@Published private(set) var mcpEntries: [MCPConfig.Entry] = []
@@ -223,7 +219,7 @@ final class SettingsModel: ObservableObject {
 		}
 	}
 
-	// MARK: Engine (Claude Code + bundled brain)
+	// MARK: Engine (Antigravity CLI + bundled brain)
 
 	func checkEngine() {
 		guard !isCheckingEngine else { return }
@@ -239,25 +235,7 @@ final class SettingsModel: ObservableObject {
 		}
 	}
 
-	func loadUsage() {
-		guard !isLoadingUsage else { return }
-		isLoadingUsage = true
-		Task { @MainActor in
-			do {
-				let limits = try await PlanUsage.fetch()
-				withAnimation(.easeOut(duration: 0.25)) { usage = limits }
-				usageError = nil
-				usageUpdatedAt = Date()
-			} catch let problem as ServiceProblem {
-				usageError = "\(problem.title). \(problem.detail)"
-			} catch {
-				usageError = error.localizedDescription
-			}
-			isLoadingUsage = false
-		}
-	}
-
-	// MARK: Instructions (appended to Claude Code's system prompt)
+	// MARK: Instructions (appended to Antigravity's system prompt)
 
 	func loadPrompts() {
 		Task { @MainActor in

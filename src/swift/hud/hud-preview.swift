@@ -75,7 +75,7 @@ enum HUDPreview {
 					m.text = """
 						I've removed the confirmation feature completely, and the new build is installed. Restart Bol to pick it up.
 
-						- **What changed:** Claude now runs in full bypass mode, so every action goes ahead without a prompt.
+						- **What changed:** Antigravity now runs in full bypass mode, so every action goes ahead without a prompt.
 						- **What I deleted:** the risky-command checker, the yes/no prompt in the voice bar, and the `Confirm risky actions` setting.
 						- **Screen setting:** its "Ask first" option used the same prompt, so I removed it. If you had it on, it now counts as automatic.
 
@@ -135,8 +135,8 @@ enum HUDPreview {
 				"11-error",
 				{ m in
 					m.phase = .error
-					m.status = "Not signed in to Claude Code"
-					m.text = "Run `claude` in a terminal and /login."
+					m.status = "Not signed in to Antigravity"
+					m.text = "Run `agy acp --login` in a terminal."
 					m.deadline = Date().addingTimeInterval(6)
 					m.deadlineTotal = 8
 				}

@@ -26,9 +26,6 @@ enum Constants {
 	static let threadsDirectory = bolDirectory.appendingPathComponent("threads")
 	/// Where Bol's Claude Code runs unless Settings picks a folder, so its sessions are a project of their own.
 	static let workspaceDirectory = bolDirectory.appendingPathComponent("workspace")
-	/// Where Claude Code keeps session transcripts, one folder per working directory.
-	static let claudeProjectsDirectory = URL(fileURLWithPath: NSHomeDirectory())
-		.appendingPathComponent(".claude/projects")
 
 	// MARK: Threads
 
@@ -52,8 +49,8 @@ enum Constants {
 	static let micSampleRate: Double = 16000
 	static let micBytesPerSecond = 32000
 
-	/// Spelling hints for speech-to-text, so "Bol" isn't heard as "bowl" and "Claude" as "cloud".
-	static let speechKeyterms = ["Bol", "Claude", "Claude Code"]
+	/// Spelling hints for speech-to-text, so "Bol" isn't heard as "bowl" and "Antigravity" isn't mangled.
+	static let speechKeyterms = ["Bol", "Antigravity", "Gemini"]
 
 	// MARK: Voice loop timing (seconds)
 
