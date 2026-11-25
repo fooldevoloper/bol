@@ -1,922 +1,915 @@
-// Claude Agent SDK sessions: the thread, one long-lived conversation with the user (resumed across
-// restarts, left behind after a day idle), plus tasks: named sessions the thread starts for real work
-// (see tasks.ts), each running on its own and messageable later.
-
-import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import { appendFile, readFile, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+// Session and task lifecycle over Antigravity ACP (`agy acp`) + Bol's in-process HTTP MCP server.
+import { randomUUID } from 'node:crypto'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
+import { AcpClient, type AcpConfigOption, type AcpSessionUpdate, type AnyAcpMcpServer } from './acp-client'
 import {
+	AGY_MCP_CONFIG_FILES,
+	AGY_SKILLS_DIRS,
+	BOL_DIR,
 	BOL_PROMPT,
-	CLAUDE_BINARY,
 	EFFORT,
 	IDLE_CONVERSATION_MS,
-	IS_CHROME_ENABLED,
 	MEMORY_DIR,
 	PROMPT_FILE,
 	SAFETY_PROMPT,
-	SCREEN_MODE,
 	SESSION_FILE,
+	TASKS_FILE,
 	THREADS_FILE,
 	WORKSPACE_DIR,
 } from './constants'
-import { answerElicitation, signIn } from './mcp-sign-in'
+import { loadAntigravityServerNames, loadCustomServers } from './mcp-config'
+import { BolMcpServer } from './mcp-server'
+import { findUrl, openInBrowser, signIn } from './mcp-sign-in'
+import { emit, log } from './protocol'
+import { makeBolTools } from './screen'
 import {
 	loadTaskRecords,
 	makeThreadTools,
 	recordTask,
+	type TaskRecord,
+	type TaskStatus,
 	taskPrompt,
 	THREAD_TASK_PROMPT,
-	type TaskStatus,
-	type ThreadHandlers,
 } from './tasks'
 import { lastActivity, makeThreadArchive } from './thread-archive'
 
-import { loadCustomServers, type CustomServers } from './mcp-config'
-import { emit, log } from './protocol'
-import { makeBolTools } from './screen'
-import { exhaustiveGuard } from './utils'
+type Origin = { kind: 'thread' } | { kind: 'task'; job: string; name: string }
 
-class InputQueue implements AsyncIterable<SDKUserMessage> {
-	private items: SDKUserMessage[] = []
-	private waiter: ((r: IteratorResult<SDKUserMessage>) => void) | null = null
-	private isClosed = false
-	push({ text }: { text: string }) {
-		const msg: SDKUserMessage = {
-			type: 'user',
-			message: { role: 'user', content: text },
-			parent_tool_use_id: null,
-		}
-		if (this.waiter != null) {
-			const w = this.waiter
-			this.waiter = null
-			w({ value: msg, done: false })
-		} else this.items.push(msg)
-	}
-	close() {
-		this.isClosed = true
-		if (this.waiter != null) {
-			const w = this.waiter
-			this.waiter = null
-			w({ value: undefined as any, done: true })
-		}
-	}
-	[Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
-		return {
-			next: () => {
-				const item = this.items.shift()
-				if (item != null) return Promise.resolve({ value: item, done: false })
-				if (this.isClosed) return Promise.resolve({ value: undefined as any, done: true })
-				return new Promise((resolve) => (this.waiter = resolve))
-			},
-		}
+type SkillInfo = {
+	name: string
+	description: string
+	argumentHint?: string
+}
+
+const TASK_HANDOFF_TOOLS = new Set([
+	'mcp_bol_start_task',
+	'mcp_bol_message_task',
+	'mcp__bol__start_task',
+	'mcp__bol__message_task',
+])
+
+const MODEL_ENV = process.env.BOL_MODEL?.trim()
+const PREFERRED_CWD =
+	process.env.BOL_CWD != null && process.env.BOL_CWD.trim().length > 0 && existsSync(process.env.BOL_CWD.trim())
+		? process.env.BOL_CWD.trim()
+		: WORKSPACE_DIR
+
+const mcpServer = new BolMcpServer()
+
+type QueuedMessage = {
+	text: string
+	resolve: () => void
+	reject: (err: Error) => void
+}
+
+function readOptionalFile({ path, maxBytes = 16_384 }: { path: string; maxBytes?: number }): string {
+	try {
+		if (!existsSync(path)) return ''
+		const text = readFileSync(path, 'utf8').trim()
+		return text.length > maxBytes ? `${text.slice(0, maxBytes)}\n…` : text
+	} catch {
+		return ''
 	}
 }
 
-/**
- * How a conversation starts: fresh, resuming the saved thread (unless it's been idle a day), continuing a
- * thread picked in the Threads window, or reopening a finished task's session to message it.
- */
-type Origin =
-	| { kind: 'fresh' }
-	| { kind: 'resume' }
-	| { kind: 'continue'; sessionId: string }
-	| { kind: 'reopen'; sessionId: string }
-
-/** Tools that hand the request to a task: the thread's reply after them is just "on it". */
-const TASK_HANDOFF_TOOLS = ['mcp__bol__start_task', 'mcp__bol__message_task']
-
-/** Mirrors every transcript to ~/.bol/threads and resumes from there. */
-const archive = makeThreadArchive()
-
-/** One SDK query: the thread (`job` null), or a task (`job` is its task id). */
-class Conversation {
-	input = new InputQueue()
-	/** What was last sent, so it can be replayed if the saved session turns out to be gone. */
-	private lastInput: string | null = null
-	readonly job: string | null
-	/** Set for a task: its name. */
-	readonly taskName: string | null
-	sessionId: string | null = null
-	/** When the conversation last did anything (epoch ms), for the one-day idle rule. */
-	lastActivityAt = Date.now()
-	/** The request being worked on, or null when idle. */
-	request: string | null = null
-	private query: Query | null = null
-	private isClosed = false
-	/** Bol's own tools, kept so the server set can be replaced live without recreating them. */
-	private readonly bolTools: ReturnType<typeof makeBolTools>
-	/** Requests sent but not yet answered: a task stays open while more are queued. */
-	private unanswered = 0
-	/** This turn handed work to a task, so its reply is only an acknowledgement. */
-	private hasDelegated = false
-	/** What the model has said since its last tool call this turn; together they are the answer. */
-	private answerParts: string[] = []
-	/** The latest request's sequence number, echoed in `idle` so the app can tell a stale one. */
-	private seq = 0
-	/** Whether this Claude Code reports session state; older ones don't, and a result then means idle. */
-	private hasStateEvents = false
-	/** An interrupt was sent: the failed result that follows belongs to the stopped turn. */
-	private isInterrupting = false
-	/** Claude Code's own background tasks (long shell commands it moved aside) still running. */
-	private liveTaskCount = 0
-	/** A job's interim reply while its tasks still run ("still searching…"), delivered if nothing newer comes. */
-	private heldResult: { text: string; isError: boolean } | null = null
-	private heldTimer: ReturnType<typeof setTimeout> | null = null
-	/** This turn's API call was rejected for auth (e.g. another Claude Code rotated the shared login). */
-	private isAuthFailed = false
-	/** Already restarted once for an auth failure; a second one is a real sign-out. */
-	private hasRetriedAuth = false
-	/** Tokens the next request re-sends (the last main-loop call's prompt + output). */
-	private contextTokens = 0
-	/** Fires just before the thread's prompt cache expires, to compact while it's still cheap. */
-	private idleCompactTimer: ReturnType<typeof setTimeout> | null = null
-
-	/** A `/compact` Bol sent itself is running: its result isn't an answer to anyone. */
-	private isIdleCompacting = false
-
-	constructor({ job, taskName }: { job: string | null; taskName: string | null }) {
-		this.job = job
-		this.taskName = taskName
-		this.bolTools = makeBolTools({
-			onScreen: ({ reason }) => this.emit({ type: 'screen', reason }),
-			// Only the thread starts tasks; a task does its own work.
-			extraTools: taskName == null ? makeThreadTools({ handlers: threadHandlers }) : [],
-		})
+function buildSystemPrompt({ rolePrompt }: { rolePrompt: string }): string {
+	const custom = readOptionalFile({ path: PROMPT_FILE, maxBytes: 32_768 })
+	const base = custom.length > 0 ? custom : BOL_PROMPT
+	const memory = readOptionalFile({ path: join(MEMORY_DIR, 'MEMORY.md'), maxBytes: 8_192 })
+	const parts = [base.trim(), SAFETY_PROMPT.trim(), rolePrompt.trim()]
+	if (memory.length > 0) {
+		parts.push(`# Persistent Memory (${join(MEMORY_DIR, 'MEMORY.md')})\n${memory}`)
 	}
+	return parts.filter((p) => p.length > 0).join('\n\n')
+}
 
-	/** `context` is sent ahead of the request (notes about background work) but isn't part of it. */
-	say({ text, context, seq }: { text: string; context: string[]; seq: number }) {
-		this.cancelIdleCompact()
-		this.request = text
-		this.seq = seq
-		this.unanswered += 1
-		this.lastInput = [...context, text].join('\n\n')
-		this.input.push({ text: this.lastInput })
-	}
+function parseFrontmatterField({ content, field }: { content: string; field: string }): string | undefined {
+	const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/)
+	if (fmMatch == null) return undefined
+	const re = new RegExp(`^${field}:\\s*(.+)$`, 'm')
+	const val = fmMatch[1]?.match(re)?.[1]?.trim()
+	if (val == null || val.length === 0) return undefined
+	return val.replace(/^['"]|['"]$/g, '')
+}
 
-	async interrupt() {
-		if (this.request == null) return
-		this.isInterrupting = true
-		await this.query?.interrupt()
-	}
-
-	/** More requests are waiting for an answer. */
-	get hasQueued(): boolean {
-		return this.unanswered > 0
-	}
-
-	close() {
-		this.isClosed = true
-		if (this.heldTimer != null) clearTimeout(this.heldTimer)
-		this.cancelIdleCompact()
+function discoverSkills({ cwd }: { cwd: string }): SkillInfo[] {
+	const byName = new Map<string, SkillInfo>()
+	const dirs = [...AGY_SKILLS_DIRS, join(cwd, '.agents', 'skills'), join(cwd, '.gemini', 'skills')]
+	for (const root of dirs) {
 		try {
-			this.input.close()
-			this.query?.close()
-		} catch {}
-	}
-
-	/** Runs until closed. Every event carries the conversation's job at the moment it's sent. */
-	async run({ origin }: { origin: Origin }) {
-		const [resume, prompt, custom] = await Promise.all([resumeId({ origin }), currentPrompt(), loadCustomServers()])
-		const append =
-			prompt + SAFETY_PROMPT + (this.taskName == null ? THREAD_TASK_PROMPT : taskPrompt({ name: this.taskName }))
-		if (origin.kind === 'resume' && resume != null) {
-			this.lastActivityAt = (await lastActivity({ sessionId: resume }))?.getTime() ?? Date.now()
-		}
-		if (this.isClosed) return
-		const q = query({
-			prompt: this.input,
-			options: {
-				cwd: process.env.BOL_CWD ?? WORKSPACE_DIR,
-				sessionStore: archive,
-				model: process.env.BOL_MODEL,
-				effort: EFFORT,
-				// Every tool call runs without asking: Bol never stops to confirm an action.
-				permissionMode: 'bypassPermissions',
-				allowDangerouslySkipPermissions: true,
-				pathToClaudeCodeExecutable: CLAUDE_BINARY,
-				systemPrompt: { type: 'preset', preset: 'claude_code', append },
-				resume,
-				// The user's Claude Code skills, by name or when a request fits one.
-				skills: 'all',
-				onElicitation: answerElicitation,
-				...(this.taskName != null && origin.kind === 'fresh' ? { title: this.taskName } : {}),
-				// Claude Code's own memory system, pointed at a single global directory:
-				// MEMORY.md index is loaded each session; individual memories are read on demand.
-				settings: { autoMemoryEnabled: true, autoMemoryDirectory: MEMORY_DIR },
-				extraArgs: IS_CHROME_ENABLED ? { chrome: null } : {},
-				mcpServers: this.mcpServers({ custom }),
-				// No product telemetry / error reporting (Datadog etc.) from Bol's Claude process.
-				env: {
-					...process.env,
-					CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-					// Report when the session is really idle, not just between queued turns.
-					CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1',
-					DISABLE_TELEMETRY: '1',
-					DISABLE_ERROR_REPORTING: '1',
-				},
-			},
-		})
-		this.query = q
-		// Control requests are answered before the first turn, so Settings lists skills right away.
-		if (this.job == null) void this.reportSkills()
-
-		try {
-			for await (const m of q) {
-				if (this.isClosed) break
-				this.lastActivityAt = Date.now()
-				switch (m.type) {
-					case 'system':
-						if (m.subtype === 'background_tasks_changed') {
-							this.liveTaskCount = m.tasks.length
-							if (this.liveTaskCount === 0) this.releaseHeldResult()
-							break
-						}
-						if (m.subtype === 'compact_boundary') {
-							const { trigger, pre_tokens, post_tokens } = m.compact_metadata
-							log({
-								msg: `compacted (${this.isIdleCompacting ? 'idle' : trigger}): ${pre_tokens} -> ${post_tokens ?? '?'} tokens`,
-							})
-							if (post_tokens != null) this.contextTokens = post_tokens
-							break
-						}
-						if (m.subtype === 'session_state_changed') {
-							// The authoritative "nothing left to do", unlike a result, which queued requests follow.
-							this.hasStateEvents = true
-							if (m.state === 'idle' && this.job == null) emit({ type: 'idle', seq: this.seq })
-							break
-						}
-						if (m.subtype === 'init') {
-							// Claude Code re-sends init after a compaction: same session, nothing new to record.
-							if (this.sessionId === m.session_id) break
-							this.sessionId = m.session_id
-							if (this.job == null) {
-								await writeFile(SESSION_FILE, m.session_id)
-								await recordThread({ sessionId: m.session_id })
-							} else {
-								await taskSessionStarted({ taskId: this.job, sessionId: m.session_id })
-							}
-							log({
-								msg: `session ${m.session_id} model=${m.model} effort=${EFFORT}${this.job == null ? '' : ` job=${this.job}`}`,
-							})
-							log({
-								msg: `mcp servers: ${m.mcp_servers.map((s) => `${s.name}=${s.status}`).join(', ')}`,
-							})
-							if (this.job == null) void this.reportMcpStatus({ problems: custom.problems })
-							const chromeTools = m.tools.filter((t) => t.includes('chrome'))
-							log({
-								msg: `tools: ${m.tools.length} total, chrome: ${chromeTools.length}`,
-							})
-						}
-						break
-					case 'assistant':
-						if (m.parent_tool_use_id != null) break // ignore subagent chatter
-						if (this.isIdleCompacting) break
-						{
-							const u = m.message.usage
-							if (u != null)
-								this.contextTokens =
-									(u.input_tokens ?? 0) +
-									(u.cache_read_input_tokens ?? 0) +
-									(u.cache_creation_input_tokens ?? 0) +
-									(u.output_tokens ?? 0)
-						}
-						if (m.error === 'authentication_failed') {
-							// Claude Code's synthetic "Failed to authenticate" message: not something to say.
-							this.isAuthFailed = true
-							break
-						}
-						for (const block of m.message.content as any[]) {
-							if (block.type === 'tool_use' && TASK_HANDOFF_TOOLS.includes(block.name))
-								this.hasDelegated = true
-							if (block.type === 'tool_use')
-								this.answerParts = [] // what came before was narration
-							else if (
-								block.type === 'text' &&
-								typeof block.text === 'string' &&
-								block.text.trim() !== ''
-							)
-								this.answerParts.push(block.text.trim())
-							if (block.type === 'tool_use')
-								this.emit({
-									type: 'tool',
-									name: block.name,
-									summary: summarizeTool({
-										name: block.name,
-										input: block.input,
-									}),
-								})
-							else if (
-								block.type === 'text' &&
-								typeof block.text === 'string' &&
-								block.text.trim() !== ''
-							)
-								this.emit({ type: 'text', text: block.text })
-						}
-						break
-					case 'result': {
-						const isSuccess = m.subtype === 'success'
-						if (!isSuccess)
-							log({
-								msg: `result ${m.subtype}${this.job == null ? '' : ` job=${this.job}`}`,
-							})
-						if (this.isIdleCompacting) {
-							this.isIdleCompacting = false
-							this.answerParts = []
-							if (!isSuccess || m.is_error) log({ msg: `idle compaction failed: ${m.subtype}` })
-							break
-						}
-						if (this.isInterrupting) {
-							this.isInterrupting = false
-							if (!isSuccess) {
-								this.answerParts = []
-								// The stopped turn's leftover: never an answer to whatever was asked next.
-								this.emit({
-									type: 'result',
-									text: '',
-									isError: true,
-									isInterrupted: true,
-								})
-								break
-							}
-						}
-						// The SDK's result is only the last thing said. When the model answers and then adds to
-						// or corrects itself in a second message, the whole answer is both.
-						const parts = this.answerParts
-						this.answerParts = []
-						let text: string
-						if (m.subtype === 'success') {
-							const isWholeAnswer = parts.length > 1 && parts[parts.length - 1] === m.result.trim()
-							text = isWholeAnswer ? parts.join(' ') : m.result
-						} else text = m.errors.length > 0 ? m.errors.join('; ') : `Error: ${m.subtype}`
-						const isAuthFailed = this.isAuthFailed || ((!isSuccess || m.is_error) && isAuthError({ text }))
-						this.isAuthFailed = false
-						if (isAuthFailed && !this.hasRetriedAuth && this.sessionId != null && !this.isClosed) {
-							// This Claude process still holds a token that's since been replaced in the keychain.
-							// A new process reads the current login; the conversation is resumed, not lost.
-							log({
-								msg: `auth failed${this.job == null ? '' : ` (job ${this.job})`}: ${text}; restarting Claude Code`,
-							})
-							this.hasRetriedAuth = true
-							await this.restartResumed({ sessionId: this.sessionId })
-							return
-						}
-						if (isAuthFailed) {
-							log({ msg: `auth failed again${this.job == null ? '' : ` (job ${this.job})`}: ${text}` })
-							this.hasRetriedAuth = false
-							this.finished({
-								text: "I'm signed out of Claude. Run claude, then /login, in a terminal and ask me again.",
-								isError: true,
-							})
-							break
-						}
-						if (isSuccess && !m.is_error) this.hasRetriedAuth = false
-						if (
-							!isSuccess &&
-							this.sessionId == null &&
-							origin.kind !== 'fresh' &&
-							isMissingSession({ text })
-						) {
-							// Claude Code deleted the transcript (cleanupPeriodDays): start over instead of failing forever.
-							log({
-								msg: `session ${resume} is gone${this.job == null ? '' : ` (job ${this.job})`}, starting fresh`,
-							})
-							await this.restartFresh()
-							return
-						}
-						this.finished({ text, isError: !isSuccess || m.is_error })
-						break
-					}
-					case 'user':
-					case 'stream_event':
-					case 'tool_progress':
-					case 'tool_use_summary':
-					case 'auth_status':
-					case 'rate_limit_event':
-					case 'prompt_suggestion':
-					case 'conversation_reset':
-						break
-					default:
-						exhaustiveGuard(m)
+			if (!existsSync(root)) continue
+			for (const entry of readdirSync(root, { withFileTypes: true })) {
+				if (entry.name.startsWith('.')) continue
+				if (entry.isDirectory() || entry.isSymbolicLink()) {
+					const skillFile = join(root, entry.name, 'SKILL.md')
+					if (!existsSync(skillFile)) continue
+					const content = readOptionalFile({ path: skillFile, maxBytes: 4096 })
+					const name = parseFrontmatterField({ content, field: 'name' }) ?? entry.name
+					const description = parseFrontmatterField({ content, field: 'description' }) ?? ''
+					byName.set(name, { name, description })
+				} else if (entry.isFile() && entry.name.endsWith('.md')) {
+					const name = basename(entry.name, '.md')
+					const content = readOptionalFile({ path: join(root, entry.name), maxBytes: 4096 })
+					const description = parseFrontmatterField({ content, field: 'description' }) ?? ''
+					byName.set(name, { name, description })
 				}
 			}
-		} catch (e: any) {
-			if (
-				!this.isClosed &&
-				this.sessionId == null &&
-				origin.kind !== 'fresh' &&
-				isMissingSession({ text: String(e?.message ?? e) })
-			) {
-				log({
-					msg: `session ${resume} is gone${this.job == null ? '' : ` (job ${this.job})`}, starting fresh`,
-				})
-				await this.restartFresh()
-				return
-			}
-			if (!this.isClosed) {
-				log({
-					msg: `session error${this.job == null ? '' : ` (job ${this.job})`}: ${e?.stack ?? e}`,
-				})
-				this.finished({
-					text: 'Sorry, my connection to Claude failed.',
-					isError: true,
-				})
-				if (this.job == null && this.hasStateEvents) emit({ type: 'idle', seq: this.seq }) // the session is gone
-				if (this.job == null && foreground === this) foreground = null
-			}
+		} catch {
+			// Ignore unreadable skill directories.
 		}
 	}
+	return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
 
-	/** Replays the pending request on a brand-new session, dropping the dead saved id. */
-	private async restartFresh() {
-		const pending = this.lastInput
+function readStoredSessionId(): string | null {
+	try {
+		const raw = readFileSync(SESSION_FILE, 'utf8').trim()
+		if (raw.length === 0) return null
+		if (raw.startsWith('{')) {
+			const parsed = JSON.parse(raw) as { sessionId?: string }
+			return parsed.sessionId ?? null
+		}
+		return raw
+	} catch {
+		return null
+	}
+}
+
+function writeStoredSessionId({ sessionId }: { sessionId: string | null }): void {
+	try {
+		mkdirSync(BOL_DIR, { recursive: true })
+		writeFileSync(SESSION_FILE, sessionId ?? '')
+	} catch (error) {
+		log({ msg: `failed to write session file: ${error}` })
+	}
+}
+
+function recordThread({ sessionId }: { sessionId: string }): void {
+	try {
+		mkdirSync(BOL_DIR, { recursive: true })
+		let alreadyHas = false
 		try {
-			this.query?.close()
-		} catch {}
-		this.query = null
-		this.input = new InputQueue()
-		if (pending != null) this.input.push({ text: pending })
-		if (this.job == null) await writeFile(SESSION_FILE, '').catch(() => {})
-		await this.run({ origin: { kind: 'fresh' } })
-	}
-
-	/**
-	 * The thread's prompt cache (1 hour on a subscription) is about to lapse with a long context in it:
-	 * compact now, while re-reading it is a cache hit, so the next request doesn't re-send it all
-	 * uncached. Claude Code's own idle compaction only runs in attended sessions (not the SDK) and
-	 * only past 200k tokens.
-	 */
-	private armIdleCompact() {
-		this.cancelIdleCompact()
-		if (this.contextTokens < IDLE_COMPACT_MIN_TOKENS) return
-		this.idleCompactTimer = setTimeout(() => {
-			this.idleCompactTimer = null
-			if (this.isClosed || this.request != null || this.unanswered > 0 || this.liveTaskCount > 0) return
-			log({
-				msg: `idle ${Math.round(IDLE_COMPACT_AFTER_MS / 60_000)}m with ${this.contextTokens} tokens, compacting before the cache expires`,
-			})
-			this.isIdleCompacting = true
-			this.input.push({ text: '/compact' })
-		}, IDLE_COMPACT_AFTER_MS)
-	}
-
-	private cancelIdleCompact() {
-		if (this.idleCompactTimer != null) clearTimeout(this.idleCompactTimer)
-		this.idleCompactTimer = null
-	}
-
-	/** Replays the pending request in a new Claude Code process that resumes this same session. */
-	private async restartResumed({ sessionId }: { sessionId: string }) {
-		const pending = this.lastInput
-		try {
-			this.query?.close()
-		} catch {}
-		this.query = null
-		this.input = new InputQueue()
-		if (pending != null) this.input.push({ text: pending })
-		await this.run({ origin: this.job == null ? { kind: 'continue', sessionId } : { kind: 'reopen', sessionId } })
-	}
-
-	/** The user's servers plus Bol's own, which always keeps its name. */
-	private mcpServers({ custom }: { custom: CustomServers }) {
-		// An SDK MCP server connects to one query at a time, so each conversation has its own.
-		return { ...custom.servers, bol: this.bolTools }
-	}
-
-	/** mcp.json changed: swap the servers in the running session, no restart. */
-	async applyMcpServers({ custom }: { custom: CustomServers }) {
-		if (this.query == null || this.isClosed) return
-		try {
-			const result = await this.query.setMcpServers(this.mcpServers({ custom }))
-			log({
-				msg: `mcp servers updated${this.job == null ? '' : ` job=${this.job}`}: +[${result.added.join(', ')}] -[${result.removed.join(', ')}]`,
-			})
-		} catch (e) {
-			log({ msg: `mcp servers update failed: ${e}` })
-		}
-		if (this.job == null) void this.reportMcpStatus({ problems: custom.problems })
-	}
-
-	/**
-	 * Tells the app how every MCP server is doing (Bol's own, the user's, Claude Code's), for
-	 * Settings. Servers connect in the background, so it reports again until none is pending.
-	 */
-	async reportMcpStatus({ problems }: { problems: CustomServers['problems'] }) {
-		for (const delayMs of [0, 1500, 4000, 10000]) {
-			if (delayMs > 0) await Bun.sleep(delayMs)
-			if (this.query == null || this.isClosed) return
-			const statuses = await this.query.mcpServerStatus().catch(() => null)
-			if (statuses == null) return
-			emit({
-				type: 'mcpStatus',
-				servers: statuses
-					.filter((s) => s.name !== 'bol')
-					.map((s) => ({
-						name: s.name,
-						status: s.status,
-						error: s.error ?? null,
-						source: s.source ?? s.scope ?? null,
-						tools: s.tools?.length ?? null,
-					})),
-				problems,
-			})
-			if (!statuses.some((s) => s.status === 'pending')) return
-		}
-	}
-
-	/** Tells the app which skills Bol can use (the user's, plugins' and projects', not Claude Code's own commands). */
-	async reportSkills() {
-		const commands = await this.query?.supportedCommands().catch(() => null)
-		if (commands == null) return
-		emit({
-			type: 'skills',
-			skills: commands
-				.filter((c) => c.builtin !== true)
-				.map((c) => ({ name: c.name, description: c.description, argumentHint: c.argumentHint })),
-		})
-	}
-
-	/** Starts an MCP server's sign-in from this session (the tokens are Claude Code's, shared by every session). */
-	async signIn({ server }: { server: string }): Promise<string> {
-		if (this.query == null) return 'Bol is still starting; try again in a moment.'
-		return signIn({ query: this.query, server })
-	}
-
-	emit(event: Record<string, unknown>) {
-		emit(this.job == null ? event : { ...event, job: this.job })
-	}
-
-	/** Claude Code's tasks ended: if no newer answer follows within a minute, the held one is final. */
-	private releaseHeldResult() {
-		if (this.heldResult == null || this.heldTimer != null) return
-		this.heldTimer = setTimeout(() => {
-			this.heldTimer = null
-			const held = this.heldResult
-			this.heldResult = null
-			if (held != null && !this.isClosed) this.finished(held)
-		}, 60_000)
-	}
-
-	private finished({ text, isError }: { text: string; isError: boolean }) {
-		if (this.job != null && this.liveTaskCount > 0 && !isError) {
-			// Claude Code is still running a command it moved aside; its real answer comes later.
-			this.heldResult = { text, isError }
-			log({
-				msg: `job ${this.job}: interim reply while ${this.liveTaskCount} task(s) run: ${text.slice(0, 120)}`,
-			})
-			return
-		}
-		this.heldResult = null
-		if (this.heldTimer != null) clearTimeout(this.heldTimer)
-		this.heldTimer = null
-		const request = this.request
-		this.request = null
-		this.unanswered = Math.max(0, this.unanswered - 1)
-		const isDelegated = this.hasDelegated
-		this.hasDelegated = false
-		this.emit({ type: 'result', text, isError, ...(isDelegated ? { isDelegated: true } : {}) })
-		if (this.job == null) {
-			this.armIdleCompact()
-
-			if (!this.hasStateEvents) emit({ type: 'idle', seq: this.seq })
-			return
-		}
-		taskFinished({ conversation: this, text, isError, request })
-	}
-}
-
-/** The thread; null until first needed or after a failure. */
-let foreground: Conversation | null = null
-/** Context for the thread (task results, mostly), sent along with its next request. */
-const notes: string[] = []
-
-/** A task Bol started: live while its session runs, kept (by name) so it can be messaged later. */
-type Task = {
-	id: string
-	name: string
-	/** The thread that started it. */
-	threadId: string | null
-	sessionId: string | null
-	conversation: Conversation | null
-	status: TaskStatus
-	/** Its latest result, for list_tasks. */
-	result: string
-}
-const tasks = new Map<string, Task>()
-
-/** Earlier tasks, from ~/.bol/tasks.jsonl, so they can be messaged after a restart. */
-export async function loadTasks() {
-	for (const record of await loadTaskRecords()) {
-		if (tasks.has(record.taskId)) continue
-		tasks.set(record.taskId, {
-			id: record.taskId,
-			name: record.name,
-			threadId: record.threadId,
-			sessionId: record.sessionId,
-			conversation: null,
-			status: 'done',
-			result: '',
-		})
-	}
-}
-
-/** The thread's task with this name (case and spacing aside); failing that, the latest anywhere. */
-function findTask({ name }: { name: string }): Task | null {
-	const key = name.trim().toLowerCase()
-	const matching = [...tasks.values()].filter((task) => task.name.toLowerCase() === key)
-	const threadId = foreground?.sessionId ?? null
-	return matching.findLast((task) => task.threadId === threadId) ?? matching.at(-1) ?? null
-}
-
-function taskEvent({ task }: { task: Task }) {
-	emit({ type: 'task', job: task.id, name: task.name, status: task.status, sessionId: task.sessionId })
-}
-
-async function taskSessionStarted({ taskId, sessionId }: { taskId: string; sessionId: string }) {
-	const task = tasks.get(taskId)
-	if (task == null) return
-	if (task.sessionId === sessionId) return
-	task.sessionId = sessionId
-	taskEvent({ task })
-	await recordTask({ taskId, name: task.name, sessionId, threadId: task.threadId, at: new Date().toISOString() })
-}
-
-function taskFinished({
-	conversation,
-	text,
-	isError,
-	request,
-}: {
-	conversation: Conversation
-	text: string
-	isError: boolean
-	request: string | null
-}) {
-	const task = conversation.job == null ? undefined : tasks.get(conversation.job)
-	if (task == null || task.conversation !== conversation) {
-		conversation.close()
-		return
-	}
-	task.result = text
-	// A follow-up came in while it was answering: it carries on with that.
-	if (!conversation.hasQueued) {
-		conversation.close() // reopened if it's messaged again
-		task.conversation = null
-		task.status = isError ? 'failed' : 'done'
-		taskEvent({ task })
-	}
-	notes.push(
-		`[Task "${task.name}" ${isError ? 'failed' : 'finished'}; the user was already told, so don't repeat it unless asked. Last request: "${request ?? ''}". Result: ${text}]`,
-	)
-}
-
-/** Sends `text` to a task: into its running session, or by reopening its finished one. */
-function sendToTask({ task, text }: { task: Task; text: string }) {
-	if (task.conversation == null) {
-		const conversation = new Conversation({ job: task.id, taskName: task.name })
-		task.conversation = conversation
-		void conversation.run({
-			origin: task.sessionId == null ? { kind: 'fresh' } : { kind: 'reopen', sessionId: task.sessionId },
-		})
-	}
-	task.status = 'running'
-	task.conversation.say({ text, context: [], seq: 0 })
-	taskEvent({ task })
-}
-
-const threadHandlers: ThreadHandlers = {
-	async start({ name, brief }) {
-		const existing = findTask({ name })
-		if (existing != null && existing.threadId === (foreground?.sessionId ?? null)) {
-			return `There's already a task named "${existing.name}" (${existing.status}). Use message_task to change it, or pick another name.`
-		}
-		const task: Task = {
-			id: 't' + crypto.randomUUID().slice(0, 8),
-			name: name.trim(),
-			threadId: foreground?.sessionId ?? null,
-			sessionId: null,
-			conversation: null,
-			status: 'running',
-			result: '',
-		}
-		tasks.set(task.id, task)
-		sendToTask({ task, text: brief })
-		log({ msg: `task ${task.id} "${task.name}" started: ${brief.slice(0, 160)}` })
-		return `Started task "${task.name}". Its result will reach the user when it's done; reply in one short sentence.`
-	},
-	async message({ name, text }) {
-		const task = findTask({ name })
-		if (task == null) return `No task named "${name}". ${await threadHandlers.list()}`
-		sendToTask({ task, text })
-		log({ msg: `task ${task.id} "${task.name}" messaged: ${text.slice(0, 160)}` })
-		return `Sent to "${task.name}"${task.sessionId == null ? '' : ', which is working on it again'}.`
-	},
-	async list() {
-		const threadId = foreground?.sessionId ?? null
-		const own = [...tasks.values()].filter((task) => task.threadId === threadId)
-		if (own.length === 0) return 'No tasks in this conversation yet.'
-		return own
-			.map(
-				(task) => `- ${task.name}: ${task.status}${task.result === '' ? '' : `. ${task.result.slice(0, 200)}`}`,
-			)
-			.join('\n')
-	},
-	async stop({ name }) {
-		const task = findTask({ name })
-		if (task == null) return `No task named "${name}".`
-		stopTask({ job: task.id })
-		return `Stopped "${task.name}".`
-	},
-	async signIn({ server }) {
-		ensureSession()
-		return foreground!.signIn({ server })
-	},
-}
-
-/** Settings → Sign In on a server that needs it. */
-export async function signInToServer({ name }: { name: string }) {
-	ensureSession()
-	await foreground!.signIn({ server: name })
-}
-
-/** Messages a task from the Threads window. */
-export function messageTask({ job, text }: { job: string; text: string }) {
-	const task = tasks.get(job)
-	if (task == null) {
-		log({ msg: `message for unknown task ${job}` })
-		return
-	}
-	sendToTask({ task, text })
-	notes.push(`[The user sent task "${task.name}" a message from the Threads window: "${text}"]`)
-	log({ msg: `task ${task.id} "${task.name}" messaged from Threads: ${text.slice(0, 160)}` })
-}
-
-/**
- * The user deleted a thread in the Bol window (the app deletes the files): let go of it and of its
- * tasks, and start a new conversation if it was the current one.
- */
-export async function forgetThread({ sessionId }: { sessionId: string }) {
-	for (const task of [...tasks.values()]) {
-		if (task.threadId !== sessionId) continue
-		task.conversation?.close()
-		tasks.delete(task.id)
-	}
-	const saved = (await readFile(SESSION_FILE, 'utf8').catch(() => '')).trim()
-	if (foreground?.sessionId === sessionId || (foreground?.sessionId == null && saved === sessionId)) {
-		resetSession()
-	}
-	log({ msg: `thread ${sessionId} deleted` })
-}
-
-export function stopTask({ job }: { job: string }) {
-	const task = tasks.get(job)
-	if (task == null || task.conversation == null) return
-	task.conversation.close()
-	task.conversation = null
-	task.status = 'stopped'
-	taskEvent({ task })
-	log({ msg: `task ${job} "${task.name}" stopped` })
-}
-
-async function resumeId({ origin }: { origin: Origin }): Promise<string | undefined> {
-	switch (origin.kind) {
-		case 'fresh':
-			return undefined
-		case 'resume': {
-			const id = (await readFile(SESSION_FILE, 'utf8').catch(() => '')).trim()
-			if (id === '') return undefined
-			const last = await lastActivity({ sessionId: id })
-			if (last != null && Date.now() - last.getTime() > IDLE_CONVERSATION_MS) {
-				log({ msg: `session ${id} idle since ${last.toISOString()}, starting a new conversation` })
-				await writeFile(SESSION_FILE, '').catch(() => {})
-				return undefined
+			const lines = readFileSync(THREADS_FILE, 'utf8').split('\n')
+			for (const line of lines) {
+				if (line.trim().length === 0) continue
+				const parsed = JSON.parse(line) as { sessionId?: string }
+				if (parsed.sessionId === sessionId) {
+					alreadyHas = true
+					break
+				}
 			}
-			return id
+		} catch {
+			// File may not exist yet.
 		}
-		case 'continue':
-			await writeFile(SESSION_FILE, origin.sessionId).catch(() => {})
-			return origin.sessionId
-		case 'reopen':
-			return origin.sessionId
-		default:
-			return exhaustiveGuard(origin)
+		if (alreadyHas) return
+		appendFileSync(THREADS_FILE, `${JSON.stringify({ sessionId, at: new Date().toISOString() })}\n`, {
+			mode: 0o600,
+		})
+	} catch (error) {
+		log({ msg: `failed to update threads.jsonl: ${error}` })
 	}
 }
 
-/** Appends to the threads index, which the app's Threads window lists. */
-async function recordThread({ sessionId }: { sessionId: string }) {
-	const line = JSON.stringify({ sessionId, job: null, forkedFrom: null, at: new Date().toISOString() })
-	await appendFile(THREADS_FILE, line + '\n').catch((e) => log({ msg: `threads index: ${e}` }))
+function removeStoredThread({ sessionId }: { sessionId: string }): void {
+	try {
+		const lines = readFileSync(THREADS_FILE, 'utf8').split('\n')
+		const kept = lines.filter((line) => {
+			if (line.trim().length === 0) return false
+			try {
+				const parsed = JSON.parse(line) as { sessionId?: string }
+				return parsed.sessionId !== sessionId
+			} catch {
+				return false
+			}
+		})
+		writeFileSync(THREADS_FILE, kept.length > 0 ? `${kept.join('\n')}\n` : '')
+	} catch {
+		// Ignore missing/invalid threads.jsonl.
+	}
 }
 
-/** Compact the idle thread at 90% of the 1-hour prompt cache TTL, as Claude Code does. */
-const IDLE_COMPACT_AFTER_MS = 54 * 60_000
-/** Below this the thread is mostly system prompt and tools; compacting saves little. */
-const IDLE_COMPACT_MIN_TOKENS = 80_000
-
-function isAuthError({ text }: { text: string }): boolean {
-	return /Failed to authenticate|OAuth token (revoked|has expired)|authentication_error/i.test(text)
+function cleanToolArgs({ args }: { args: Record<string, unknown> }): Record<string, unknown> {
+	const cleaned: Record<string, unknown> = {}
+	for (const [key, value] of Object.entries(args)) {
+		if (key === 'toolSummary') continue
+		cleaned[key] = value
+	}
+	return cleaned
 }
 
-function isMissingSession({ text }: { text: string }): boolean {
-	return text.includes('No conversation found with session ID')
+function summarizeTool({ name, args }: { name: string; args: Record<string, unknown> }): string {
+	if (typeof args.toolSummary === 'string' && args.toolSummary.trim().length > 0) {
+		return args.toolSummary.trim()
+	}
+	const shortName = name.replace(/^mcp_bol_/, '').replace(/^mcp__bol__/, '')
+	if (typeof args.command === 'string') return args.command.slice(0, 80)
+	if (typeof args.CommandLine === 'string') return args.CommandLine.slice(0, 80)
+	if (typeof args.file_path === 'string') return basename(args.file_path)
+	if (typeof args.AbsolutePath === 'string') return basename(args.AbsolutePath)
+	if (typeof args.TargetFile === 'string') return basename(args.TargetFile)
+	if (typeof args.query === 'string') return args.query.slice(0, 60)
+	if (typeof args.Query === 'string') return args.Query.slice(0, 60)
+	if (typeof args.url === 'string') return args.url.slice(0, 60)
+	if (typeof args.Url === 'string') return args.Url.slice(0, 60)
+	if (typeof args.name === 'string') return args.name
+	if (typeof args.application === 'string') return args.application
+	return shortName
 }
 
-async function currentPrompt(): Promise<string> {
-	const custom = (await readFile(PROMPT_FILE, 'utf8').catch(() => '')).trim()
-	return custom === '' ? BOL_PROMPT : '\n' + custom + '\n'
-}
-
-function summarizeTool({ name, input: inp }: { name: string; input: any }): string {
-	if (name === 'Bash')
-		return typeof inp?.description === 'string' && inp.description !== ''
-			? inp.description
-			: String(inp?.command ?? '').slice(0, 80)
-	if (name === 'Read' || name === 'Write' || name === 'Edit')
-		return String(inp?.file_path ?? '').replace(homedir(), '~')
-	if (name === 'WebSearch') return String(inp?.query ?? '')
-	if (name === 'WebFetch') return String(inp?.url ?? '')
-	if (name === 'Glob' || name === 'Grep') return String(inp?.pattern ?? '')
-	if (name === 'mcp__bol__key' || name === 'mcp__bol__hold_key') return String(inp?.text ?? '')
-	if (name === 'mcp__bol__open_application') return String(inp?.app ?? '')
+function extractToolResultText({ update }: { update: AcpSessionUpdate }): string {
+	const parts: string[] = []
+	if (Array.isArray(update.content)) {
+		for (const item of update.content) {
+			const c = (item as { content?: { type?: string; text?: string }; text?: string }) ?? {}
+			if (typeof c.content?.text === 'string') parts.push(c.content.text)
+			else if (typeof c.text === 'string') parts.push(c.text)
+		}
+	}
+	if (parts.length > 0) return parts.join('\n')
+	if (update.rawOutput != null) {
+		if (typeof update.rawOutput === 'string') return update.rawOutput
+		const out = update.rawOutput as { output?: unknown; text?: unknown }
+		if (typeof out.output === 'string') return out.output
+		if (typeof out.text === 'string') return out.text
+		return JSON.stringify(update.rawOutput)
+	}
 	return ''
 }
 
-function startForeground({ origin }: { origin: Origin }): Conversation {
-	const conversation = new Conversation({ job: null, taskName: null })
-	foreground = conversation
-	void conversation.run({ origin })
-	return conversation
+function chooseThoughtLevel({
+	configOptions,
+	desired,
+}: {
+	configOptions?: AcpConfigOption[]
+	desired: string
+}): string | null {
+	const opt = configOptions?.find((o) => o.id === 'thought_level')
+	if (opt == null) return null
+	const values = new Set((opt.options ?? []).map((o) => o.value))
+	if (values.size === 0) return desired
+	if (values.has(desired)) return desired
+	if (desired === 'max' && values.has('xhigh')) return 'xhigh'
+	if ((desired === 'max' || desired === 'xhigh') && values.has('high')) return 'high'
+	if (values.has('medium')) return 'medium'
+	return opt.options?.[0]?.value ?? null
 }
 
-function liveConversations(): Conversation[] {
-	return [foreground, ...[...tasks.values()].map((task) => task.conversation)].filter(
-		(c): c is Conversation => c != null,
-	)
+function chooseModelValue({
+	configOptions,
+	models,
+	desired,
+}: {
+	configOptions?: AcpConfigOption[]
+	models?: { availableModels?: { modelId: string }[] }
+	desired?: string
+}): string | null {
+	if (desired == null || desired.length === 0 || desired === 'default' || desired === 'auto') return null
+	const opt = configOptions?.find((o) => o.id === 'model')
+	const optValues = (opt?.options ?? []).map((o) => o.value)
+	const modelValues = (models?.availableModels ?? []).map((m) => m.modelId)
+	const all = optValues.length > 0 ? optValues : modelValues
+	if (all.length === 0 || all.includes(desired)) return desired
+	const prefixMatch = all.find((m) => m.startsWith(desired))
+	return prefixMatch ?? desired
 }
 
-/** mcp.json changed: every live conversation picks up the new servers. */
-export async function reloadCustomServers() {
-	const custom = await loadCustomServers()
-	log({
-		msg: `mcp.json: ${Object.keys(custom.servers).length} server(s)${custom.problems.length > 0 ? `, ${custom.problems.length} problem(s)` : ''}`,
+class Conversation {
+	readonly origin: Origin
+	readonly mcpKey: string
+	sessionId: string | null = null
+	private client: AcpClient | null = null
+	private startPromise: Promise<void> | null = null
+	private queue: QueuedMessage[] = []
+	private isRunningTurn = false
+	private currentModel = MODEL_ENV ?? ''
+	private archive: ReturnType<typeof makeThreadArchive> | null = null
+	private readonly authUrls = new Map<string, string>()
+
+	// Per-turn update tracking.
+	private turnText = ''
+	private turnSawHandoff = false
+	private readonly seenTools = new Map<
+		string,
+		{ name: string; input: Record<string, unknown>; archivedResult: boolean }
+	>()
+
+	constructor({ origin, initialSessionId }: { origin: Origin; initialSessionId?: string | null }) {
+		this.origin = origin
+		this.mcpKey = origin.kind === 'thread' ? `thread-${randomUUID()}` : `task-${origin.job}`
+		this.sessionId = initialSessionId ?? null
+		if (this.sessionId != null) {
+			this.archive = makeThreadArchive({ sessionId: this.sessionId })
+		}
+	}
+
+	get isBusy(): boolean {
+		return this.isRunningTurn || this.queue.length > 0
+	}
+
+	async ensureStarted({ resumeIfPossible = true }: { resumeIfPossible?: boolean } = {}): Promise<void> {
+		if (this.client != null && this.sessionId != null) return
+		if (this.startPromise != null) return this.startPromise
+		this.startPromise = this.startInternal({ resumeIfPossible }).finally(() => {
+			this.startPromise = null
+		})
+		return this.startPromise
+	}
+
+	private async startInternal({ resumeIfPossible }: { resumeIfPossible: boolean }): Promise<void> {
+		const isThread = this.origin.kind === 'thread'
+		const rolePrompt = isThread ? THREAD_TASK_PROMPT : taskPrompt({ name: this.origin.name })
+		const appendSystemPrompt = buildSystemPrompt({ rolePrompt })
+
+		const extraTools = isThread
+			? makeThreadTools({
+					handlers: {
+						start: ({ name, brief }) => startTask({ name, brief }),
+						message: ({ name, text }) => messageTaskByName({ name, text }),
+						list: () => listTasksText(),
+						stop: ({ name }) => stopTaskByName({ name }),
+						signIn: ({ server }) => signIn({ name: server, authUrl: this.authUrls.get(server) }),
+					},
+				})
+			: []
+
+		const bolTools = makeBolTools({
+			onScreen: ({ reason }) => {
+				emit({ type: 'screen', reason, ...(this.origin.kind === 'task' ? { job: this.origin.job } : {}) })
+			},
+			extraTools,
+		})
+		const bolMcp = mcpServer.register({ key: this.mcpKey, name: 'bol', tools: bolTools })
+		const custom = await loadCustomServers()
+		const mcpServers: AnyAcpMcpServer[] = [bolMcp, ...Object.values(custom.servers)]
+
+		const client = new AcpClient({
+			cwd: PREFERRED_CWD,
+			onUpdate: ({ update }) => this.handleUpdate({ update }),
+			onElicitation: (params) => {
+				const url =
+					typeof params.url === 'string' ? params.url : findUrl({ text: String(params.message ?? '') })
+				const serverName = typeof params.serverName === 'string' ? params.serverName : 'mcp'
+				if (url != null) {
+					this.authUrls.set(serverName, url)
+					openInBrowser({ url })
+					emit({ type: 'mcpSignIn', name: serverName, url, error: null })
+				}
+			},
+			onExit: ({ code }) => {
+				if (this.client === client) {
+					log({ msg: `${this.originLabel()} ACP exited unexpectedly (${code})` })
+					this.client = null
+				}
+			},
+		})
+		this.client = client
+
+		await client.initialize()
+
+		let info
+		const wantedResume = resumeIfPossible && this.sessionId != null
+		if (wantedResume && this.sessionId != null) {
+			try {
+				info = await client.resumeSession({
+					sessionId: this.sessionId,
+					cwd: PREFERRED_CWD,
+					mcpServers,
+					appendSystemPrompt,
+				})
+			} catch (error) {
+				log({ msg: `resumeSession failed (${error}); starting new session` })
+				this.sessionId = null
+			}
+		}
+		if (info == null) {
+			info = await client.newSession({
+				cwd: PREFERRED_CWD,
+				mcpServers,
+				appendSystemPrompt,
+			})
+		}
+
+		this.sessionId = info.sessionId
+		this.currentModel = info.models?.currentModelId ?? this.currentModel
+		this.archive = makeThreadArchive({ sessionId: info.sessionId })
+
+		if (isThread) {
+			writeStoredSessionId({ sessionId: info.sessionId })
+			recordThread({ sessionId: info.sessionId })
+		}
+
+		const modelValue = chooseModelValue({
+			configOptions: info.configOptions,
+			models: info.models,
+			desired: MODEL_ENV,
+		})
+		if (modelValue != null) {
+			try {
+				await client.setConfigOption({ sessionId: info.sessionId, configId: 'model', value: modelValue })
+				this.currentModel = modelValue
+			} catch (error) {
+				log({ msg: `setConfigOption model=${modelValue} failed: ${error}` })
+			}
+		}
+
+		const thoughtValue = chooseThoughtLevel({ configOptions: info.configOptions, desired: EFFORT })
+		if (thoughtValue != null) {
+			try {
+				await client.setConfigOption({
+					sessionId: info.sessionId,
+					configId: 'thought_level',
+					value: thoughtValue,
+				})
+			} catch (error) {
+				log({ msg: `setConfigOption thought_level=${thoughtValue} failed: ${error}` })
+			}
+		}
+
+		if (isThread) {
+			emitSkills({ availableCommands: undefined })
+		}
+	}
+
+	enqueue({ text }: { text: string }): Promise<void> {
+		return new Promise((resolve, reject) => {
+			this.queue.push({ text, resolve, reject })
+			void this.drain()
+		})
+	}
+
+	private async drain(): Promise<void> {
+		if (this.isRunningTurn) return
+		const next = this.queue.shift()
+		if (next == null) return
+		this.isRunningTurn = true
+		try {
+			await this.runTurn({ text: next.text })
+			next.resolve()
+		} catch (error) {
+			next.reject(error instanceof Error ? error : new Error(String(error)))
+		} finally {
+			this.isRunningTurn = false
+			if (this.queue.length > 0) {
+				void this.drain()
+			} else if (this.origin.kind === 'thread') {
+				emit({ type: 'idle', seq: latestSeq })
+			}
+		}
+	}
+
+	private async runTurn({ text }: { text: string }): Promise<void> {
+		await this.ensureStarted()
+		if (this.client == null || this.sessionId == null) {
+			throw new Error('ACP client failed to initialize')
+		}
+
+		this.turnText = ''
+		this.turnSawHandoff = false
+		this.seenTools.clear()
+		this.archive?.appendUser({ text })
+
+		let stopReason = 'end_turn'
+		let usage: Record<string, number> | undefined
+		const job = this.origin.kind === 'task' ? this.origin.job : undefined
+
+		try {
+			const res = await this.client.prompt({ sessionId: this.sessionId, text })
+			stopReason = res.stopReason ?? 'end_turn'
+			if (res.usage != null) {
+				usage = Object.fromEntries(
+					Object.entries(res.usage).filter(([, v]) => typeof v === 'number'),
+				) as Record<string, number>
+			}
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error)
+			this.archive?.appendError({ error: msg })
+			emit({
+				type: 'result',
+				text: msg,
+				isError: true,
+				...(job != null ? { job } : {}),
+			})
+			throw error
+		}
+
+		const finalText = this.turnText.trim()
+		if (finalText.length > 0) {
+			this.archive?.appendAssistant({
+				content: [{ type: 'text', text: finalText }],
+				model: this.currentModel || undefined,
+				usage,
+			})
+		}
+
+		const cancelled = stopReason === 'cancelled'
+		if (this.origin.kind === 'thread') {
+			if (cancelled) {
+				emit({ type: 'result', text: '', isError: false, isInterrupted: true })
+			} else {
+				emit({
+					type: 'result',
+					text: finalText,
+					isError: false,
+					...(this.turnSawHandoff ? { isDelegated: true } : {}),
+				})
+			}
+		} else {
+			onTaskTurnDone({ job: this.origin.job, text: finalText, cancelled })
+		}
+	}
+
+	private handleUpdate({ update }: { update: AcpSessionUpdate }): void {
+		const kind = update.sessionUpdate
+		if (kind === 'available_commands_update') {
+			const cmds: SkillInfo[] = Array.isArray(update.availableCommands)
+				? (update.availableCommands as { name?: string; description?: string }[])
+						.filter((c) => typeof c.name === 'string' && c.name.length > 0)
+						.map((c) => ({ name: c.name as string, description: c.description ?? '' }))
+				: []
+			if (this.origin.kind === 'thread') emitSkills({ availableCommands: cmds })
+			return
+		}
+
+		if (kind === 'agent_message_chunk') {
+			const content = update.content as { type?: string; text?: string } | undefined
+			if (content?.type === 'text' && typeof content.text === 'string' && content.text.length > 0) {
+				this.turnText += content.text
+				if (this.origin.kind === 'thread') {
+					emit({ type: 'text', text: content.text })
+				}
+			}
+			return
+		}
+
+		if (kind === 'tool_call') {
+			const callId = String(update.toolCallId ?? randomUUID())
+			const rawName = String(update.name ?? update.title ?? 'tool')
+			const rawArgs = (
+				typeof update.args === 'object' && update.args != null
+					? update.args
+					: typeof update.rawInput === 'object' && update.rawInput != null
+						? update.rawInput
+						: {}
+			) as Record<string, unknown>
+			const input = cleanToolArgs({ args: rawArgs })
+			if (TASK_HANDOFF_TOOLS.has(rawName)) this.turnSawHandoff = true
+
+			if (!this.seenTools.has(callId)) {
+				this.seenTools.set(callId, { name: rawName, input, archivedResult: false })
+				const summary = summarizeTool({ name: rawName, args: rawArgs })
+				emit({
+					type: 'tool',
+					name: rawName,
+					summary,
+					...(this.origin.kind === 'task' ? { job: this.origin.job } : {}),
+				})
+				this.archive?.appendAssistant({
+					content: [{ type: 'tool_use', id: callId, name: rawName, input }],
+					model: this.currentModel || undefined,
+				})
+			}
+			return
+		}
+
+		if (kind === 'tool_call_update') {
+			const callId = String(update.toolCallId ?? '')
+			const status = String(update.status ?? '')
+			if (status !== 'completed' && status !== 'failed') return
+			const tracked = this.seenTools.get(callId)
+			if (tracked?.archivedResult) return
+			if (tracked != null) tracked.archivedResult = true
+			const text = extractToolResultText({ update })
+			if (status === 'failed') {
+				const url = findUrl({ text })
+				if (url != null && tracked != null) {
+					const serverMatch = tracked.name.match(/^mcp_([^_]+)_/) ?? tracked.name.match(/^mcp__([^_]+)__/)
+					if (serverMatch?.[1] != null) this.authUrls.set(serverMatch[1], url)
+				}
+			}
+			if (callId.length > 0) {
+				this.archive?.appendToolResult({
+					toolUseId: callId,
+					content: text,
+					isError: status === 'failed',
+				})
+			}
+		}
+	}
+
+	async interrupt(): Promise<void> {
+		for (const q of this.queue) q.reject(new Error('Interrupted'))
+		this.queue = []
+		if (this.client != null && this.sessionId != null) {
+			this.client.cancel({ sessionId: this.sessionId })
+		}
+	}
+
+	async close(): Promise<void> {
+		for (const q of this.queue) q.reject(new Error('Session closed'))
+		this.queue = []
+		mcpServer.unregister({ key: this.mcpKey })
+		const client = this.client
+		const sessionId = this.sessionId ?? undefined
+		this.client = null
+		if (client != null) {
+			await client.close({ sessionId })
+		}
+	}
+
+	private originLabel(): string {
+		return this.origin.kind === 'thread' ? 'thread' : `task(${this.origin.name})`
+	}
+}
+
+type TaskRuntime = {
+	record: TaskRecord
+	status: TaskStatus
+	result: string
+	conversation: Conversation
+}
+
+const taskMap = new Map<string, TaskRuntime>()
+let foreground: Conversation | null = null
+let cachedCommands: SkillInfo[] = []
+let latestSeq = 0
+
+function emitSkills({ availableCommands }: { availableCommands?: SkillInfo[] }): void {
+	if (availableCommands != null) cachedCommands = availableCommands
+	const local = discoverSkills({ cwd: PREFERRED_CWD })
+	const byName = new Map<string, SkillInfo>()
+	for (const cmd of cachedCommands) byName.set(cmd.name, cmd)
+	for (const skill of local) byName.set(skill.name, skill)
+	const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
+	emit({ type: 'skills', skills })
+}
+
+function getOrCreateForeground({ forceNew = false }: { forceNew?: boolean } = {}): Conversation {
+	if (!forceNew && foreground != null) {
+		const sid = foreground.sessionId
+		if (sid != null) {
+			const at = lastActivity({ sessionId: sid })
+			if (at > 0 && Date.now() - at > IDLE_CONVERSATION_MS) {
+				void foreground.close()
+				foreground = null
+				writeStoredSessionId({ sessionId: null })
+			}
+		}
+	}
+	if (!forceNew && foreground != null) return foreground
+
+	const storedId = forceNew ? null : readStoredSessionId()
+	const validStored =
+		storedId != null &&
+		(lastActivity({ sessionId: storedId }) === 0 ||
+			Date.now() - lastActivity({ sessionId: storedId }) <= IDLE_CONVERSATION_MS)
+			? storedId
+			: null
+
+	if (validStored == null && storedId != null) {
+		writeStoredSessionId({ sessionId: null })
+	}
+
+	foreground = new Conversation({ origin: { kind: 'thread' }, initialSessionId: validStored })
+	return foreground
+}
+
+function emitTaskEvent({ runtime }: { runtime: TaskRuntime }): void {
+	emit({
+		type: 'task',
+		job: runtime.record.taskId,
+		name: runtime.record.name,
+		status: runtime.status,
+		sessionId: runtime.conversation.sessionId ?? runtime.record.sessionId,
 	})
-	await Promise.all(liveConversations().map((c) => c.applyMcpServers({ custom })))
 }
 
-/** Settings asked how the MCP servers are doing. */
-export async function requestMcpStatus() {
-	ensureSession()
-	const custom = await loadCustomServers()
-	void foreground?.reportSkills()
-	await foreground?.reportMcpStatus({ problems: custom.problems })
+function onTaskTurnDone({ job, text, cancelled }: { job: string; text: string; cancelled: boolean }): void {
+	const runtime = taskMap.get(job)
+	if (runtime == null) return
+	runtime.status = cancelled ? 'stopped' : 'done'
+	runtime.result = text
+	runtime.record.sessionId = runtime.conversation.sessionId ?? runtime.record.sessionId
+	void recordTask(runtime.record)
+	emitTaskEvent({ runtime })
+
+	if (cancelled) {
+		emit({ type: 'result', text: '', isError: false, isInterrupted: true, job })
+	} else {
+		emit({ type: 'result', text, isError: false, job })
+	}
+
+	if (!cancelled && text.length > 0 && foreground != null && !foreground.isBusy) {
+		void foreground.enqueue({ text: `[Task "${runtime.record.name}" finished]: ${text}` }).catch((error) => {
+			log({ msg: `task handoff note failed: ${error}` })
+		})
+	}
 }
 
-export function ensureSession() {
-	if (foreground == null) startForeground({ origin: { kind: 'resume' } })
+async function startTask({ name, brief }: { name: string; brief: string }): Promise<string> {
+	const job = randomUUID()
+	const conversation = new Conversation({ origin: { kind: 'task', job, name } })
+	const record: TaskRecord = {
+		taskId: job,
+		name,
+		sessionId: '',
+		threadId: foreground?.sessionId ?? null,
+		at: new Date().toISOString(),
+	}
+	const runtime: TaskRuntime = { record, status: 'running', result: '', conversation }
+	taskMap.set(job, runtime)
+	emitTaskEvent({ runtime })
+
+	void conversation
+		.ensureStarted({ resumeIfPossible: false })
+		.then(async () => {
+			record.sessionId = conversation.sessionId ?? ''
+			await recordTask(record)
+			emitTaskEvent({ runtime })
+			await conversation.enqueue({ text: brief })
+		})
+		.catch((error) => {
+			runtime.status = 'failed'
+			runtime.result = error instanceof Error ? error.message : String(error)
+			emitTaskEvent({ runtime })
+			emit({ type: 'result', text: runtime.result, isError: true, job })
+		})
+
+	return `Started task "${name}".`
 }
 
-/** The one-day rule: a thread idle that long is left behind, and the next request starts a new one. */
-function leaveIdleConversation() {
-	if (foreground == null || foreground.request != null) return
-	const idleMs = Date.now() - foreground.lastActivityAt
-	if (foreground.sessionId == null || idleMs <= IDLE_CONVERSATION_MS) return
-	log({
-		msg: `session ${foreground.sessionId} idle for ${Math.round(idleMs / 3_600_000)}h, starting a new conversation`,
+async function messageTaskByName({ name, text }: { name: string; text: string }): Promise<string> {
+	const target = [...taskMap.values()].find((t) => t.record.name.toLowerCase() === name.trim().toLowerCase())
+	if (target == null) return `No task named "${name}".`
+	target.status = 'running'
+	emitTaskEvent({ runtime: target })
+	void target.conversation.enqueue({ text }).catch((error) => {
+		target.status = 'failed'
+		target.result = error instanceof Error ? error.message : String(error)
+		emitTaskEvent({ runtime: target })
 	})
-	resetSession()
+	return `Sent message to task "${target.record.name}".`
 }
 
-export function say({ text, seq }: { text: string; seq: number }) {
-	leaveIdleConversation()
-	ensureSession()
-	foreground!.say({ text, context: notes.splice(0), seq })
+async function listTasksText(): Promise<string> {
+	if (taskMap.size === 0) return 'No tasks yet.'
+	return [...taskMap.values()]
+		.map((t) => `- ${t.record.name} [${t.status}]${t.result ? `: ${t.result}` : ''}`)
+		.join('\n')
 }
 
-/** Makes a thread picked in the Threads window the conversation again, however old it is. */
-export function continueSession({ sessionId }: { sessionId: string }) {
-	if (foreground?.sessionId === sessionId) return
-	foreground?.close()
-	notes.splice(0)
-	startForeground({ origin: { kind: 'continue', sessionId } })
-	log({ msg: `continuing session ${sessionId}` })
+async function stopTaskByName({ name }: { name: string }): Promise<string> {
+	const target = [...taskMap.values()].find((t) => t.record.name.toLowerCase() === name.trim().toLowerCase())
+	if (target == null) return `No task named "${name}".`
+	await target.conversation.interrupt()
+	await target.conversation.close()
+	target.status = 'stopped'
+	emitTaskEvent({ runtime: target })
+	return `Stopped task "${target.record.name}".`
 }
 
-export async function interruptSession() {
-	if (foreground == null) return
-	await foreground.interrupt()
-	if (foreground != null) foreground.request = null
+export async function loadTasks(): Promise<void> {
+	const records = await loadTaskRecords()
+	for (const rec of records) {
+		if (taskMap.has(rec.taskId)) continue
+		const conv = new Conversation({
+			origin: { kind: 'task', job: rec.taskId, name: rec.name },
+			initialSessionId: rec.sessionId || null,
+		})
+		taskMap.set(rec.taskId, {
+			record: rec,
+			status: 'done',
+			result: '',
+			conversation: conv,
+		})
+	}
 }
 
-export function closeSession() {
-	for (const conversation of liveConversations()) conversation.close()
+export function ensureSession(): void {
+	const conv = getOrCreateForeground()
+	void conv.ensureStarted().catch((error) => {
+		log({ msg: `session pre-warm failed: ${error}` })
+	})
+}
+
+export function say({ text, seq }: { text: string; seq: number }): void {
+	latestSeq = seq
+	const conv = getOrCreateForeground()
+	void conv.enqueue({ text }).catch((error) => {
+		log({ msg: `say failed: ${error}` })
+	})
+}
+
+export function continueSession({ sessionId }: { sessionId: string }): void {
+	void foreground?.close()
+	writeStoredSessionId({ sessionId })
+	foreground = new Conversation({ origin: { kind: 'thread' }, initialSessionId: sessionId })
+	void foreground.ensureStarted({ resumeIfPossible: true }).catch((error) => {
+		log({ msg: `continueSession failed: ${error}` })
+	})
+}
+
+export async function interruptSession(): Promise<void> {
+	await foreground?.interrupt()
+}
+
+export function closeSession(): void {
+	void foreground?.close()
 	foreground = null
+	for (const runtime of taskMap.values()) {
+		void runtime.conversation.close()
+	}
+	mcpServer.stop()
 }
 
-/** A new thread. Running tasks carry on; they belong to the thread that started them. */
-export function resetSession() {
-	foreground?.close()
-	notes.splice(0)
-	void writeFile(SESSION_FILE, '').catch(() => {})
-	startForeground({ origin: { kind: 'fresh' } })
+export function resetSession(): void {
+	void foreground?.close()
+	foreground = null
+	writeStoredSessionId({ sessionId: null })
+	const next = getOrCreateForeground({ forceNew: true })
+	void next.ensureStarted({ resumeIfPossible: false }).catch((error) => {
+		log({ msg: `resetSession failed: ${error}` })
+	})
+}
+
+export async function reloadCustomServers(): Promise<void> {
+	await requestMcpStatus()
+	const active = foreground
+	if (active != null && !active.isBusy) {
+		const sid = active.sessionId
+		await active.close()
+		foreground = new Conversation({ origin: { kind: 'thread' }, initialSessionId: sid })
+		void foreground.ensureStarted({ resumeIfPossible: true }).catch((error) => {
+			log({ msg: `reloadCustomServers restart failed: ${error}` })
+		})
+	}
+}
+
+export async function requestMcpStatus(): Promise<void> {
+	const custom = await loadCustomServers()
+	const externalNames = await loadAntigravityServerNames({ files: AGY_MCP_CONFIG_FILES })
+	const servers = [
+		...Object.keys(custom.servers).map((name) => ({
+			name,
+			status: 'connected',
+			error: null,
+			source: 'dynamic',
+			tools: null,
+		})),
+		...externalNames
+			.filter((name) => !(name in custom.servers))
+			.map((name) => ({
+				name,
+				status: 'connected',
+				error: null,
+				source: 'user',
+				tools: null,
+			})),
+	]
+	emit({ type: 'mcpStatus', servers, problems: custom.problems })
+}
+
+export async function signInToServer({ name }: { name: string }): Promise<void> {
+	await signIn({ name })
+}
+
+export async function messageTask({ job, text }: { job: string; text: string }): Promise<void> {
+	const target = taskMap.get(job)
+	if (target == null) return
+	target.status = 'running'
+	emitTaskEvent({ runtime: target })
+	void target.conversation.enqueue({ text }).catch((error) => {
+		target.status = 'failed'
+		target.result = error instanceof Error ? error.message : String(error)
+		emitTaskEvent({ runtime: target })
+		emit({ type: 'result', text: target.result, isError: true, job })
+	})
+}
+
+export async function forgetThread({ sessionId }: { sessionId: string }): Promise<void> {
+	removeStoredThread({ sessionId })
+	for (const [job, runtime] of [...taskMap.entries()]) {
+		if (runtime.record.threadId === sessionId) {
+			await runtime.conversation.interrupt()
+			await runtime.conversation.close()
+			taskMap.delete(job)
+			try {
+				appendFileSync(TASKS_FILE, `${JSON.stringify({ taskId: job, isDeleted: true })}\n`)
+			} catch {
+				// Best effort cleanup.
+			}
+		}
+	}
+	if (foreground?.sessionId === sessionId) {
+		resetSession()
+	}
+}
+
+export async function stopTask({ job }: { job: string }): Promise<void> {
+	const target = taskMap.get(job)
+	if (target == null) return
+	await target.conversation.interrupt()
+	await target.conversation.close()
+	target.status = 'stopped'
+	emitTaskEvent({ runtime: target })
 }

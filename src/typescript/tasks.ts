@@ -1,11 +1,11 @@
-// Tasks: named Claude Agent SDK sessions the thread starts for real work. Each runs on its own from a
+// Tasks: named Antigravity ACP sessions the thread starts for real work. Each runs on its own from a
 // brief Bol writes, reports its result, and can be messaged again later (by voice through Bol, or from
 // the Threads window), resuming its session if it had finished. The thread gets these as tools.
 
-import { tool } from '@anthropic-ai/claude-agent-sdk'
 import { appendFile, readFile } from 'node:fs/promises'
 import { z } from 'zod'
 import { TASKS_FILE } from './constants'
+import { type BolTool, tool } from './mcp-server'
 import { log } from './protocol'
 
 export type TaskStatus = 'running' | 'done' | 'failed' | 'stopped'
@@ -62,11 +62,11 @@ export type ThreadHandlers = {
 const asText = (text: string) => ({ content: [{ type: 'text' as const, text }] })
 
 /** The thread's own tools: tasks, and signing in to MCP servers. */
-export function makeThreadTools({ handlers }: { handlers: ThreadHandlers }) {
+export function makeThreadTools({ handlers }: { handlers: ThreadHandlers }): BolTool[] {
 	return [
 		tool(
 			'start_task',
-			'Start a named task: a separate Claude session that does real work on its own (research, writing, coding, files, ' +
+			'Start a named task: a separate Antigravity session that does real work on its own (research, writing, coding, files, ' +
 				"operating apps or the browser, anything that takes more than a few seconds) while you stay free for the user. It can't see this " +
 				'conversation, so the brief must hold everything it needs. Its result reaches the user when it finishes.',
 			{
@@ -102,7 +102,7 @@ export function makeThreadTools({ handlers }: { handlers: ThreadHandlers }) {
 		tool(
 			'sign_in_to_server',
 			"Sign the user in to an MCP server or connector that needs it (its tools fail with an authorization error, or the user asks): opens the server's sign-in page in their browser, and it connects once they finish there.",
-			{ server: z.string().describe("The MCP server's name, as its tools show it (mcp__<server>__…)") },
+			{ server: z.string().describe("The MCP server's name, as its tools show it (mcp_<server>_…)") },
 			async ({ server }) => asText(await handlers.signIn({ server })),
 		),
 	]
@@ -114,7 +114,7 @@ You are the user's one long-running conversation, and you stay free for them. Fo
 When the user refers to a task, running or finished ("tell the icon task to…", "make it blue instead"), use message_task rather than starting a new one; list_tasks shows them, stop_task stops one. Task results reach the user directly and come back to you as notes: don't repeat them unless asked.
 
 # Skills and sign-ins
-The user's Claude Code skills are available through the Skill tool. When they name one ("use my release skill", "run the morning brief") or a request fits one, use it, or start a task whose brief says to use that skill.
+The user's Antigravity skills live in \`~/.gemini/skills\`, \`~/.gemini/antigravity/skills\`, \`~/.agents/skills\`, or the workspace. When they name one ("use my release skill", "run the morning brief") or a request fits one, read its \`SKILL.md\` and follow it, or start a task whose brief says to use that skill.
 If an MCP server or connector needs the user to sign in, call sign_in_to_server and tell them to finish in the browser.
 `
 

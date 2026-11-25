@@ -1,17 +1,8 @@
 // The user's own MCP servers, from ~/.bol/mcp.json.
 //
-// The file uses the format Claude Code, Claude Desktop and Cursor share, so configs can be pasted
-// in as they are:
-//
-//   { "mcpServers": { "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
-//                                 "env": { "GITHUB_TOKEN": "…" } },
-//                     "linear": { "type": "http", "url": "https://mcp.linear.app/mcp" } } }
-//
-// Each server is checked on its own, so one bad entry doesn't take the others down. `"disabled": true`
-// keeps an entry without loading it. Servers added with `claude mcp add` load as well, through
-// Claude Code's own settings.
+// Formatted cleanly for Antigravity ACP (`http` and `stdio` transports) while keeping the
+// standard `~/.bol/mcp.json` schema (`env` and `headers` as string maps) so existing configs work.
 
-import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import { watch } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { basename } from 'node:path'
@@ -43,19 +34,49 @@ const Remote = z.object({
 
 const NAME = /^[A-Za-z0-9_-]{1,64}$/
 
+export type AcpStdioMcpServer = {
+	name: string
+	command: string
+	args: string[]
+	env: { name: string; value: string }[]
+}
+
+export type AcpHttpMcpServer = {
+	type: 'http'
+	name: string
+	url: string
+	headers: { name: string; value: string }[]
+}
+
+export type AcpMcpServer = AcpStdioMcpServer | AcpHttpMcpServer
+
 export type CustomServers = {
-	servers: Record<string, McpServerConfig>
+	servers: Record<string, AcpMcpServer>
 	/** Entries that couldn't be used, with why: shown in Settings. */
 	problems: { name: string; error: string }[]
 }
 
-function toConfig(entry: z.infer<typeof Stdio> | z.infer<typeof Remote>): McpServerConfig {
+function toNamedList(record?: Record<string, string>): { name: string; value: string }[] {
+	if (record == null) return []
+	return Object.entries(record).map(([name, value]) => ({ name, value }))
+}
+
+function toConfig(name: string, entry: z.infer<typeof Stdio> | z.infer<typeof Remote>): AcpMcpServer | null {
 	if ('command' in entry) {
-		const { disabled: _, type: __, ...rest } = entry
-		return { type: 'stdio', ...rest }
+		return {
+			name,
+			command: entry.command,
+			args: entry.args ?? [],
+			env: toNamedList(entry.env),
+		}
 	}
-	const { disabled: _, type, ...rest } = entry
-	return type === 'sse' ? { type: 'sse', ...rest } : { type: 'http', ...rest }
+	if (entry.type === 'sse') return null
+	return {
+		type: 'http',
+		name,
+		url: entry.url,
+		headers: toNamedList(entry.headers),
+	}
 }
 
 export async function loadCustomServers(): Promise<CustomServers> {
@@ -94,9 +115,34 @@ export async function loadCustomServers(): Promise<CustomServers> {
 			continue
 		}
 		if (entry.data.disabled === true) continue
-		result.servers[name] = toConfig(entry.data)
+		const config = toConfig(name, entry.data)
+		if (config == null) {
+			result.problems.push({ name, error: 'SSE transport is not supported by Antigravity (use http or stdio)' })
+			continue
+		}
+		result.servers[name] = config
 	}
 	return result
+}
+
+/** Reads server names configured globally in Antigravity so Settings can list them alongside ~/.bol/mcp.json. */
+export async function loadAntigravityServerNames({ files }: { files: string[] }): Promise<string[]> {
+	const names = new Set<string>()
+	for (const file of files) {
+		try {
+			const parsed = JSON.parse(await readFile(file, 'utf8')) as { mcpServers?: unknown }
+			if (
+				parsed?.mcpServers != null &&
+				typeof parsed.mcpServers === 'object' &&
+				!Array.isArray(parsed.mcpServers)
+			) {
+				for (const name of Object.keys(parsed.mcpServers)) names.add(name)
+			}
+		} catch {
+			// File may not exist or be empty.
+		}
+	}
+	return [...names]
 }
 
 /** Calls `onChange` (debounced) whenever mcp.json is written, created or deleted. */

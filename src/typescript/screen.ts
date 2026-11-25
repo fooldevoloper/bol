@@ -1,12 +1,12 @@
 // look_at_screen: an in-process MCP tool that screenshots the frontmost window.
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { readFile, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { SCREEN_MODE } from './constants'
 import { controlTools } from './control'
+import { type BolTool, tool } from './mcp-server'
 import { sh } from './utils'
 
 /** Frontmost app, window title and (for browsers) the current URL. */
@@ -97,18 +97,14 @@ const makeLookAtScreen = ({ onScreen }: { onScreen: (event: { reason: string }) 
 		},
 	)
 
-/** Bol's own tools. An SDK MCP server serves one query at a time, so each conversation makes its own. */
+/** Bol's own tools, registered on `BolMcpServer` for each conversation or task. */
 export function makeBolTools({
 	onScreen,
 	extraTools,
 }: {
 	onScreen: (event: { reason: string }) => void
 	/** The thread's task tools. */
-	extraTools: ReturnType<typeof tool<any>>[]
-}) {
-	return createSdkMcpServer({
-		name: 'bol',
-		version: '1.0.0',
-		tools: [...(SCREEN_MODE === 'off' ? [] : [makeLookAtScreen({ onScreen }), ...controlTools]), ...extraTools],
-	})
+	extraTools: BolTool[]
+}): BolTool[] {
+	return [...(SCREEN_MODE === 'off' ? [] : [makeLookAtScreen({ onScreen }), ...controlTools]), ...extraTools]
 }

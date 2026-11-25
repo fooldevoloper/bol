@@ -1,9 +1,9 @@
-// Bol brain: a long-lived Claude Agent SDK session driven over stdio.
+// Bol brain: a long-lived Antigravity ACP session driven over stdio.
 // The Swift menu-bar app spawns this process and talks to it with JSON lines (see protocol.ts).
 
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
-import { BOL_PROMPT, CLAUDE_BINARY, DEFAULT_PROMPT_FILE, MEMORY_DIR, THREADS_DIR, WORKSPACE_DIR } from './constants'
+import { AGY_BINARY, BOL_PROMPT, DEFAULT_PROMPT_FILE, MEMORY_DIR, THREADS_DIR, WORKSPACE_DIR } from './constants'
 import { resolveControl } from './control'
 import { watchCustomServers } from './mcp-config'
 import { Command, emit, log } from './protocol'
@@ -79,7 +79,7 @@ rl.on('close', () => {
 	process.exit(0)
 })
 
-log({ msg: `claude code: ${CLAUDE_BINARY}` })
+log({ msg: `agy: ${AGY_BINARY}` })
 await loadTasks()
 ensureSession()
 watchCustomServers({ onChange: () => void reloadCustomServers() })

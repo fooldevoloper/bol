@@ -1,13 +1,12 @@
 // Computer control: screenshots, pointer, keyboard, clipboard and apps, as in-process MCP tools.
 //
-// Claude Code has its own computer use, but only wires it up in interactive sessions, never through
-// the SDK. These tools follow its names and parameters, without its per-app permission step: the
-// user has given Bol the run of this Mac. The Swift app performs each action, since it holds the
-// Accessibility and Screen Recording grants; this file only describes the tools and relays them.
+// Antigravity ACP doesn't include Bol's low-level macOS pointer/keyboard actions natively, so Bol
+// exposes them over HTTP MCP without per-app prompts. The Swift app performs each action, since it
+// holds the Accessibility and Screen Recording grants; this file describes the tools and relays them.
 
-import { tool } from '@anthropic-ai/claude-agent-sdk'
 import { readFile, unlink } from 'node:fs/promises'
 import { z } from 'zod'
+import { tool } from './mcp-server'
 import { emit } from './protocol'
 
 const CONTROL_TIMEOUT_MS = 120_000
